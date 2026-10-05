@@ -143,11 +143,18 @@ async function isRemoteTtsAvailable(force = false): Promise<boolean> {
   }
 }
 
-async function synthesizeRemoteChunk(text: string): Promise<Blob> {
+async function synthesizeRemoteChunk(text: string, customApiKey?: string): Promise<Blob> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  if (customApiKey) {
+    headers['x-gemini-api-key'] = customApiKey;
+  }
   const response = await fetch('/api/tts', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ text }),
+    headers,
+    body: JSON.stringify({ text, apiKey: customApiKey }),
   });
   let payload: RemoteTtsResponse = {};
   try {
@@ -181,21 +188,18 @@ export async function getVoiceCatalog(): Promise<VoiceCatalogItem[]> {
 }
 
 export async function getStoredVoices(): Promise<string[]> {
-  const piper = await import('@mintplex-labs/piper-tts-web');
-  const stored = await piper.stored();
-  if (!(await isRemoteTtsAvailable())) return stored;
-  const raw = await piper.voices();
-  return Array.from(new Set([...stored, ...Object.keys(raw)]));
+  try {
+    const piper = await import('@mintplex-labs/piper-tts-web');
+    return await piper.stored();
+  } catch {
+    return [];
+  }
 }
 
 export async function downloadVoice(
   voiceId: string,
   onProgress: (value: number) => void
 ): Promise<void> {
-  if (await isRemoteTtsAvailable()) {
-    onProgress(100);
-    return;
-  }
   const piper = await import('@mintplex-labs/piper-tts-web');
   await piper.download(voiceId, progress => {
     if (progress.loaded !== undefined && progress.total)
@@ -210,7 +214,6 @@ export async function downloadVoice(
 }
 
 export async function removeVoice(voiceId: string): Promise<void> {
-  if (await isRemoteTtsAvailable()) return;
   const piper = await import('@mintplex-labs/piper-tts-web');
   await piper.remove(voiceId);
 }
@@ -219,46 +222,85 @@ export async function synthesizeChapter(
   text: string,
   voiceId: string,
   onProgress: (value: number, label: string) => void,
-  shouldCancel: () => boolean
+  shouldCancel: () => boolean,
+  customApiKey?: string
 ): Promise<{ blob: Blob; duration: number }> {
   const chunks = chunkForSpeech(text);
   const blobs: Blob[] = [];
-  const useRemote = await isRemoteTtsAvailable(true);
+  let useRemote = Boolean(customApiKey) || (await isRemoteTtsAvailable(false));
 
   if (useRemote) {
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (shouldCancel()) throw new Error('Génération annulée.');
-      onProgress(
-        Math.round((index / chunks.length) * 100),
-        `Gemini · segment ${index + 1}/${chunks.length}`
-      );
-      blobs.push(await synthesizeRemoteChunk(chunks[index]));
-    }
-  } else {
-    const piper = await import('@mintplex-labs/piper-tts-web');
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (shouldCancel()) throw new Error('Génération annulée.');
-      onProgress(
-        Math.round((index / chunks.length) * 100),
-        `Synthèse locale ${index + 1}/${chunks.length}`
-      );
-      const wav = await piper.predict(
-        { text: chunks[index], voiceId },
-        progress => {
-          if (progress.loaded !== undefined && progress.total) {
-            const downloadPart = progress.loaded / progress.total;
-            onProgress(
-              Math.round(((index + downloadPart) / chunks.length) * 100),
-              `Préparation de la voix locale · ${Math.round(downloadPart * 100)} %`
-            );
-          }
-        }
-      );
-      blobs.push(wav);
+    try {
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (shouldCancel()) throw new Error('Génération annulée.');
+        onProgress(
+          Math.round((index / chunks.length) * 100),
+          `Gemini Cloud · segment ${index + 1}/${chunks.length}`
+        );
+        const chunkBlob = await synthesizeRemoteChunk(chunks[index], customApiKey);
+        blobs.push(chunkBlob);
+      }
+    } catch (remoteError: any) {
+      console.warn('Gemini TTS indisponible ou quota atteint, bascule automatique sur Piper TTS local:', remoteError);
+      if (!customApiKey) {
+        // Désactiver le cloud temporairement pour ne pas relancer des 429 sur la clé par défaut
+        remoteCapabilityCache = { value: false, expiresAt: Date.now() + 15 * 60 * 1000 };
+      }
+      useRemote = false;
+      blobs.length = 0;
+      onProgress(5, 'Quota Gemini atteint · Bascule automatique sur Piper (Voix locale)');
     }
   }
 
-  onProgress(96, 'Assemblage du chapitre');
+  if (!useRemote) {
+    try {
+      const piper = await import('@mintplex-labs/piper-tts-web');
+      const stored = await piper.stored();
+      
+      // Si la voix locale demandée n'est pas encore téléchargée, on la prépare
+      const effectiveVoiceId = stored.includes(voiceId) ? voiceId : (stored[0] || voiceId);
+      if (!stored.includes(effectiveVoiceId)) {
+        onProgress(10, `Téléchargement de la voix locale (${effectiveVoiceId})...`);
+        await piper.download(effectiveVoiceId, progress => {
+          if (progress.loaded !== undefined && progress.total) {
+            const downloadPart = progress.loaded / progress.total;
+            onProgress(
+              Math.round(10 + downloadPart * 30),
+              `Téléchargement voix locale · ${Math.round(downloadPart * 100)} %`
+            );
+          }
+        });
+      }
+
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (shouldCancel()) throw new Error('Génération annulée.');
+        onProgress(
+          Math.round(40 + (index / chunks.length) * 55),
+          `Synthèse locale Piper · segment ${index + 1}/${chunks.length}`
+        );
+        const wav = await piper.predict(
+          { text: chunks[index], voiceId: effectiveVoiceId },
+          progress => {
+            if (progress.loaded !== undefined && progress.total) {
+              const part = progress.loaded / progress.total;
+              onProgress(
+                Math.round(40 + ((index + part) / chunks.length) * 55),
+                `Synthèse vocale locale · ${Math.round(part * 100)} %`
+              );
+            }
+          }
+        );
+        blobs.push(wav);
+      }
+    } catch (piperErr: any) {
+      console.error('Erreur Piper local:', piperErr);
+      throw new Error(
+        "Le quota gratuit Gemini (10 requêtes/jour) a été atteint. Pour continuer à générer des fichiers WAV, renseignez votre clé Gemini dans les réglages (icône roue crantée), ou écoutez directement le texte grâce au bouton « Voix système »."
+      );
+    }
+  }
+
+  onProgress(96, 'Assemblage du chapitre audio');
   const merged = await mergeWavBlobs(blobs);
   onProgress(100, 'Chapitre prêt');
   return merged;

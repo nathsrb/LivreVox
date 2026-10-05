@@ -16,9 +16,6 @@ type PdfResult = {
   ocrUsed: boolean;
 };
 
-type PdfPasswordUpdater = (password: string | Error) => void;
-type PdfProgress = { loaded: number; total: number };
-
 class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
   private readonly file: File;
   private aborted = false;
@@ -38,6 +35,7 @@ class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
       })
       .catch(error => {
         console.error('Lecture locale du PDF impossible', error);
+        if (!this.aborted) this.onDataRange(begin, null);
       });
   }
 
@@ -70,7 +68,7 @@ export async function renderPdfPageImage(
     disableAutoFetch: true,
     disableStream: true,
   });
-  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
+  loadingTask.onPassword = (updatePassword: (password: string | Error) => void, reason: unknown) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = requestPassword ? await requestPassword(incorrect) : null;
@@ -81,36 +79,22 @@ export async function renderPdfPageImage(
   let canvas: HTMLCanvasElement | null = null;
   try {
     const pdf = await loadingTask.promise;
-    if (pageNumber < 1 || pageNumber > pdf.numPages)
-      throw new Error('Page PDF invalide.');
+    if (pageNumber < 1 || pageNumber > pdf.numPages) throw new Error('Page PDF invalide.');
     const page = await pdf.getPage(pageNumber);
     try {
-      const viewport = page.getViewport({ scale: 1.2 });
+      const viewport = page.getViewport({ scale: 1.55 });
       canvas = globalThis.document.createElement('canvas');
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext('2d', { alpha: false });
-      if (!context) throw new Error('Impossible de préparer la page.');
-      await page.render({ canvas, canvasContext: context, viewport }).promise;
-      return await new Promise<Blob>((resolve, reject) =>
-        canvas!.toBlob(
-          blob =>
-            blob
-              ? resolve(blob)
-              : reject(new Error('Impossible de convertir la page en image.')),
-          'image/jpeg',
-          0.8
-        )
-      );
+      if (!context) throw new Error('Impossible de préparer la page pour l’OCR cloud.');
+      await page.render({ canvasContext: context, viewport, canvas } as any).promise;
+      return await new Promise<Blob>((resolve, reject) => canvas!.toBlob(blob => blob ? resolve(blob) : reject(new Error('Impossible de convertir la page en image.')), 'image/jpeg', 0.86));
     } finally {
       page.cleanup();
     }
   } finally {
-    if (canvas) {
-      canvas.width = 0;
-      canvas.height = 0;
-      canvas.remove();
-    }
+    if (canvas) { canvas.width = 0; canvas.height = 0; canvas.remove(); }
     rangeTransport.abort();
     await loadingTask.destroy().catch(() => undefined);
   }
@@ -121,7 +105,7 @@ export async function extractPdf(
   options: PdfOptions,
   onProgress: (progress: ImportProgress) => void
 ): Promise<PdfResult> {
-  onProgress({ stage: 'Ouverture du PDF', progress: 2 });
+  onProgress({ stage: 'Ouverture du PDF par blocs', progress: 2 });
   const rangeTransport = new LocalFileRangeTransport(file);
   const loadingTask = pdfjsLib.getDocument({
     range: rangeTransport,
@@ -130,63 +114,105 @@ export async function extractPdf(
     disableStream: true,
   });
 
-  loadingTask.onProgress = (progress: PdfProgress) => {
+  loadingTask.onProgress = (progress: { loaded: number; total: number }) => {
     if (!progress.total) return;
     const ratio = Math.max(0, Math.min(1, progress.loaded / progress.total));
     onProgress({
-      stage: 'Lecture du document',
+      stage: 'Lecture des données nécessaires',
       progress: Math.max(2, Math.min(7, Math.round(ratio * 7))),
     });
   };
 
-  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
+  loadingTask.onPassword = (updatePassword: (password: string | Error) => void, reason: unknown) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = options.requestPassword
         ? await options.requestPassword(incorrect)
         : null;
-      if (password) updatePassword(password);
-      else updatePassword(new Error('Ouverture du PDF annulée.'));
+      if (password) {
+        updatePassword(password);
+      } else {
+        updatePassword(new Error('Ouverture du PDF annulée.'));
+      }
     })();
   };
 
   const pageTexts: string[] = [];
+  let ocrUsed = false;
+  let ocrWorker: Awaited<
+    ReturnType<(typeof import('tesseract.js'))['createWorker']>
+  > | null = null;
 
   try {
     const pdfDocument = await loadingTask.promise;
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       const page = await pdfDocument.getPage(pageNumber);
+      let canvas: HTMLCanvasElement | null = null;
+
       try {
         const content = await page.getTextContent();
-        const pageText = textFromContent(content.items as Array<unknown>);
+        let pageText = textFromContent(content.items as Array<unknown>);
+        const shouldOcr =
+          options.autoOcr && pageText.replace(/\s/g, '').length < 70;
 
-        // LivreVox lit uniquement le vrai texte du PDF.
-        // Les images, illustrations et pages scannées sans couche texte sont ignorées.
-        if (pageText.replace(/\s/g, '').length >= 20) {
-          pageTexts.push(pageText);
+        if (shouldOcr) {
+          if (!ocrWorker) {
+            onProgress({
+              stage: 'Chargement de l’OCR local',
+              progress: Math.max(
+                8,
+                Math.round((pageNumber / pdfDocument.numPages) * 70)
+              ),
+            });
+            const { createWorker } = await import('tesseract.js');
+            ocrWorker = await createWorker(options.ocrLang);
+          }
+
+          const viewport = page.getViewport({ scale: 1.55 });
+          canvas = globalThis.document.createElement('canvas');
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const context = canvas.getContext('2d', { alpha: false });
+          if (!context)
+            throw new Error('Impossible de préparer cette page pour l’OCR.');
+
+          await page.render({ canvasContext: context, viewport, canvas } as any).promise;
+          const recognition = await ocrWorker.recognize(canvas);
+          if (recognition.data.text.trim().length > pageText.trim().length)
+            pageText = recognition.data.text.trim();
+          ocrUsed = true;
         }
 
+        pageTexts.push(pageText);
         onProgress({
-          stage: `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
-          progress: 8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
+          stage: shouldOcr
+            ? `OCR de la page ${pageNumber}/${pdfDocument.numPages}`
+            : `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
+          progress:
+            8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
         });
       } finally {
+        if (canvas) {
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas.remove();
+        }
         page.cleanup();
       }
     }
 
     onProgress({
-      stage: 'Création des chapitres',
+      stage: 'Nettoyage et création des chapitres',
       progress: 95,
     });
-
     return {
       text: pageTexts.join('\n\n'),
       pages: pdfDocument.numPages,
-      ocrUsed: false,
+      ocrUsed,
     };
   } finally {
+    if (ocrWorker) await ocrWorker.terminate();
     rangeTransport.abort();
     await loadingTask.destroy().catch(() => undefined);
   }

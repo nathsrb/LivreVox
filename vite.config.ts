@@ -3,24 +3,19 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  base: '/',
   define: {
     global: 'globalThis',
   },
   server: {
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-      },
-    },
-  },
-  optimizeDeps: {
-    include: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
+    host: '0.0.0.0',
+    port: 3000,
+    allowedHosts: true,
   },
   build: {
-    outDir: 'dist',
-    sourcemap: false,
+    outDir: process.env.APPDEPLOY_VITE_OUT_DIR || 'dist',
+    sourcemap:
+      process.env.APPDEPLOY_VITE_SOURCEMAP === 'hidden' ? 'hidden' : false,
     rollupOptions: {
       maxParallelFileOps: 128,
     },

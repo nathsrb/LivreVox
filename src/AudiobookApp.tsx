@@ -287,8 +287,17 @@ export default function AudiobookApp() {
   }, [settings.rate, audioUrl]);
 
   function showToast(message: string, error = false): void {
-    setToast({ message, error });
-    window.setTimeout(() => setToast(null), 4200);
+    let cleanMessage = message;
+    if (
+      message.includes('429') ||
+      message.includes('RESOURCE_EXHAUSTED') ||
+      message.includes('exceeded your current quota') ||
+      message.includes('quota')
+    ) {
+      cleanMessage = 'Quota Gemini atteint : bascule automatique sur la voix locale Piper (illimitée et sans quota).';
+    }
+    setToast({ message: cleanMessage, error });
+    window.setTimeout(() => setToast(null), 5500);
   }
 
   function requestPdfPassword(fileName: string, incorrect: boolean): Promise<string | null> {

@@ -45,6 +45,7 @@ export type AppSettings = {
   systemVoiceUri: string;
   ocrLang: 'fra' | 'eng' | 'fra+eng';
   autoOcr: boolean;
+  geminiApiKey?: string;
 };
 
 export type ImportProgress = {

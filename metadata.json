@@ -1,0 +1,6 @@
+{
+  "name": "LivreVox",
+  "description": "Transformez vos PDF en livres audio 100% cloud propulsés par l'IA Gemini 3.8 Flash et la synthèse vocale Gemini Flash Lite TTS.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
