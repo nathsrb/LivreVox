@@ -53,7 +53,6 @@ const replacements: Array<[RegExp, string]> = [
   [/pour poursuivre l’import local/gi, 'pour continuer'],
   [/du stockage cloud LivreVox/gi, 'de LivreVox'],
   [/du stockage local de cet appareil/gi, 'de LivreVox'],
-  [/Ouvrir l’audio cloud/gi, 'Écouter l’audio'],
   [/Télécharger le WAV/gi, 'Télécharger l’audio'],
   [/Voix système pour l’écoute instantanée/gi, 'Voix pour l’écoute instantanée'],
   [/Voix système/gi, 'Lecture'],
@@ -62,11 +61,11 @@ const replacements: Array<[RegExp, string]> = [
 function polish(value: string): string {
   let result = value;
   for (const [pattern, replacement] of replacements) result = result.replace(pattern, replacement);
+  if (result === value) return value;
   return result
-    .replace(/\s{2,}/g, ' ')
+    .replace(/ {2,}/g, ' ')
     .replace(/\s+·\s*$/g, '')
-    .replace(/^\s*·\s+/g, '')
-    .trim();
+    .replace(/^\s*·\s+/g, '');
 }
 
 function polishNode(root: ParentNode): void {
@@ -76,7 +75,7 @@ function polishNode(root: ParentNode): void {
   for (const node of nodes) {
     const current = node.nodeValue ?? '';
     const next = polish(current);
-    if (next !== current.trim()) node.nodeValue = next;
+    if (next !== current) node.nodeValue = next;
   }
 
   if (root instanceof Element) {
