@@ -1,0 +1,4192 @@
+
+
+==========================================================================================
+FICHIER: index.html
+==========================================================================================
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LivreVox — PDF vers livre audio local</title>
+    <meta
+      name="description"
+      content="Transformez vos PDF en livres audio directement dans votre navigateur, sans envoyer vos documents vers une API."
+    />
+    <meta name="theme-color" content="#0b1020" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>
+
+
+==========================================================================================
+FICHIER: package.json
+==========================================================================================
+
+{
+  "name": "vite-react-app",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
+    "fflate": "^0.8.3",
+    "lucide-react": "^0.469.0",
+    "onnxruntime-web": "^1.30.0",
+    "pdfjs-dist": "^6.3.289",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}
+
+
+==========================================================================================
+FICHIER: postcss.config.js
+==========================================================================================
+
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+
+
+==========================================================================================
+FICHIER: tailwind.config.js
+==========================================================================================
+
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: { extend: {} },
+  plugins: [],
+};
+
+
+==========================================================================================
+FICHIER: tsconfig.json
+==========================================================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+
+
+==========================================================================================
+FICHIER: vite.config.ts
+==========================================================================================
+
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  base: './',
+  define: {
+    global: 'globalThis',
+  },
+  optimizeDeps: {
+    include: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
+  },
+  build: {
+    outDir: process.env.APPDEPLOY_VITE_OUT_DIR || 'dist',
+    sourcemap:
+      process.env.APPDEPLOY_VITE_SOURCEMAP === 'hidden' ? 'hidden' : false,
+    rollupOptions: {
+      maxParallelFileOps: 128,
+    },
+  },
+});
+
+
+==========================================================================================
+FICHIER: cron.json
+==========================================================================================
+
+[
+  {
+    "name": "livrevox-cloud-worker",
+    "cron": "*/15 * * * *",
+    "handler": "cloudWorker",
+    "timezone": "Europe/Paris",
+    "payload": {}
+  }
+]
+
+
+==========================================================================================
+FICHIER: src/App.tsx
+==========================================================================================
+
+import AudiobookApp from './AudiobookApp';
+
+function App() {
+  return <AudiobookApp />;
+}
+
+export default App;
+
+
+==========================================================================================
+FICHIER: src/main.tsx
+==========================================================================================
+
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);
+
+
+==========================================================================================
+FICHIER: src/vite-env.d.ts
+==========================================================================================
+
+/// <reference types="vite/client" />
+
+
+==========================================================================================
+FICHIER: src/piper.d.ts
+==========================================================================================
+
+declare module '@mintplex-labs/piper-tts-web' {
+  export type PiperVoice = Record<string, unknown>;
+  export type DownloadProgress = {
+    url?: string;
+    loaded?: number;
+    total?: number;
+  };
+  export function predict(
+    options: { text: string; voiceId: string },
+    onProgress?: (progress: DownloadProgress) => void
+  ): Promise<Blob>;
+  export function download(
+    voiceId: string,
+    onProgress?: (progress: DownloadProgress) => void
+  ): Promise<void>;
+  export function voices(): Promise<Record<string, PiperVoice>>;
+  export function stored(): Promise<string[]>;
+  export function remove(voiceId: string): Promise<void>;
+  export function flush(): Promise<void>;
+}
+
+
+==========================================================================================
+FICHIER: src/types.ts
+==========================================================================================
+
+export type Chapter = {
+  id: string;
+  title: string;
+  text: string;
+  words: number;
+  estimatedMinutes: number;
+  audioUrl?: string;
+  audioMimeType?: string;
+  pageStart?: number;
+  pageEnd?: number;
+};
+
+export type Book = {
+  id: string;
+  title: string;
+  sourceName: string;
+  sourceSize: number;
+  pages: number;
+  createdAt: number;
+  updatedAt: number;
+  ocrUsed: boolean;
+  chapters: Chapter[];
+  progress: Record<string, number>;
+  cloudJobId?: string;
+  cloudStatus?: string;
+  cloudProcessingProgress?: number;
+  cloudAudioReady?: number;
+  cloudTtsConfigured?: boolean;
+  cloudTtsProvider?: string;
+};
+
+export type AudioRecord = {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  voiceId: string;
+  blob: Blob;
+  duration: number;
+  createdAt: number;
+};
+
+export type AppSettings = {
+  rate: number;
+  voiceId: string;
+  systemVoiceUri: string;
+  ocrLang: 'fra' | 'eng' | 'fra+eng';
+  autoOcr: boolean;
+};
+
+export type ImportProgress = {
+  stage: string;
+  progress: number;
+};
+
+
+==========================================================================================
+FICHIER: src/lib/cloud.ts
+==========================================================================================
+
+import { api, image } from '@appdeploy/client';
+
+export const CLOUD_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
+type ProgressCallback = (stage: string, progress: number) => void;
+
+export type CloudChapterStatus = {
+  id: string;
+  title: string;
+  text: string;
+  words: number;
+  estimatedMinutes: number;
+  pageStart: number;
+  pageEnd: number;
+  audioUrl?: string;
+  audioMimeType?: string;
+};
+
+export type CloudJobStatus = {
+  id: string;
+  title: string;
+  name: string;
+  size: number;
+  status: string;
+  pages: number;
+  nextPage: number;
+  processingProgress: number;
+  audioReady: number;
+  ttsConfigured: boolean;
+  ttsProvider: string;
+  needsOcrPage?: number | null;
+  error?: string;
+  chapters: CloudChapterStatus[];
+};
+
+export type CloudCapabilities = {
+  cloud: boolean;
+  ttsConfigured: boolean;
+  ttsProvider: string;
+  chunkUpload: boolean;
+  ocr: boolean;
+};
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const stride = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += stride) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + stride, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function withRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Échec de la transmission cloud.');
+}
+
+export async function getCloudCapabilities(): Promise<CloudCapabilities> {
+  const response = await api.get('/api/cloud/capabilities');
+  return response.data as CloudCapabilities;
+}
+
+export async function uploadPdfToCloud(file: File, onProgress: ProgressCallback): Promise<string> {
+  const start = await api.post('/api/cloud/jobs', {
+    name: file.name,
+    title: file.name.replace(/\.pdf$/i, '').trim() || 'Livre sans titre',
+    size: file.size,
+    mimeType: file.type || 'application/pdf',
+  });
+  const { id, chunkSize } = start.data as { id: string; chunkSize: number };
+  const totalParts = Math.ceil(file.size / chunkSize);
+  let nextIndex = 0;
+  let completed = 0;
+
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= totalParts) return;
+      const begin = index * chunkSize;
+      const end = Math.min(file.size, begin + chunkSize);
+      const data = arrayBufferToBase64(await file.slice(begin, end).arrayBuffer());
+      await withRetry(() => api.post(`/api/cloud/jobs/${id}/chunk`, { index, data }));
+      completed += 1;
+      const ratio = completed / Math.max(1, totalParts);
+      onProgress(`Envoi cloud · bloc ${completed}/${totalParts}`, 4 + Math.round(ratio * 54));
+    }
+  };
+
+  await Promise.all([worker(), worker(), worker()]);
+  onProgress('Validation du fichier dans le cloud', 60);
+  await api.post(`/api/cloud/jobs/${id}/complete`, { totalParts });
+  return id;
+}
+
+export async function getCloudJob(jobId: string): Promise<CloudJobStatus> {
+  const response = await api.get(`/api/cloud/jobs/${jobId}`);
+  return response.data as CloudJobStatus;
+}
+
+export async function processCloudStep(jobId: string): Promise<CloudJobStatus> {
+  const response = await api.post(`/api/cloud/jobs/${jobId}/process-next`, {});
+  return response.data as CloudJobStatus;
+}
+
+export async function generateCloudAudioStep(jobId: string): Promise<CloudJobStatus> {
+  const response = await api.post(`/api/cloud/jobs/${jobId}/tts-next`, {});
+  return response.data as CloudJobStatus;
+}
+
+export async function submitCloudOcrPage(jobId: string, pageNumber: number, pageImage: Blob): Promise<CloudJobStatus> {
+  const prepared = await image.resizeIfNeeded(pageImage, { maxDimension: 1600, maxPixels: 2_000_000, quality: 0.84, mimeType: 'image/jpeg' });
+  const response = await api.post(`/api/cloud/jobs/${jobId}/ocr-page`, {
+    pageNumber,
+    image: { data: prepared.data, mimeType: prepared.mimeType },
+  });
+  return response.data as CloudJobStatus;
+}
+
+export async function deleteCloudJob(jobId: string): Promise<void> {
+  await api.delete(`/api/cloud/jobs/${jobId}`);
+}
+
+
+==========================================================================================
+FICHIER: src/lib/storage.ts
+==========================================================================================
+
+import type { AudioRecord, Book } from '../types';
+
+const DB_NAME = 'livrevox-db';
+const DB_VERSION = 1;
+const BOOKS = 'books';
+const AUDIO = 'audio';
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(BOOKS))
+        db.createObjectStore(BOOKS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(AUDIO)) {
+        const store = db.createObjectStore(AUDIO, { keyPath: 'id' });
+        store.createIndex('bookId', 'bookId', { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () =>
+      reject(
+        request.error ?? new Error('Impossible d’ouvrir le stockage local.')
+      );
+  });
+}
+
+function requestAsPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () =>
+      reject(request.error ?? new Error('Erreur de stockage local.'));
+  });
+}
+
+function transactionDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () =>
+      reject(tx.error ?? new Error('Transaction locale échouée.'));
+    tx.onabort = () =>
+      reject(tx.error ?? new Error('Transaction locale annulée.'));
+  });
+}
+
+export async function getBooks(): Promise<Book[]> {
+  const db = await openDb();
+  const tx = db.transaction(BOOKS, 'readonly');
+  const result = await requestAsPromise(
+    tx.objectStore(BOOKS).getAll() as IDBRequest<Book[]>
+  );
+  db.close();
+  return result.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function putBook(book: Book): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(BOOKS, 'readwrite');
+  tx.objectStore(BOOKS).put(book);
+  await transactionDone(tx);
+  db.close();
+}
+
+export async function deleteBook(bookId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([BOOKS, AUDIO], 'readwrite');
+  tx.objectStore(BOOKS).delete(bookId);
+  const audioStore = tx.objectStore(AUDIO);
+  const index = audioStore.index('bookId');
+  const cursorRequest = index.openCursor(IDBKeyRange.only(bookId));
+  await new Promise<void>((resolve, reject) => {
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      cursor.delete();
+      cursor.continue();
+    };
+    cursorRequest.onerror = () =>
+      reject(cursorRequest.error ?? new Error('Suppression audio échouée.'));
+  });
+  await transactionDone(tx);
+  db.close();
+}
+
+export async function putAudio(record: AudioRecord): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(AUDIO, 'readwrite');
+  tx.objectStore(AUDIO).put(record);
+  await transactionDone(tx);
+  db.close();
+}
+
+export async function getAudio(
+  bookId: string,
+  chapterId: string
+): Promise<AudioRecord | undefined> {
+  const db = await openDb();
+  const tx = db.transaction(AUDIO, 'readonly');
+  const result = await requestAsPromise(
+    tx.objectStore(AUDIO).get(`${bookId}:${chapterId}`) as IDBRequest<
+      AudioRecord | undefined
+    >
+  );
+  db.close();
+  return result;
+}
+
+export async function getBookAudio(bookId: string): Promise<AudioRecord[]> {
+  const db = await openDb();
+  const tx = db.transaction(AUDIO, 'readonly');
+  const index = tx.objectStore(AUDIO).index('bookId');
+  const result = await requestAsPromise(
+    index.getAll(IDBKeyRange.only(bookId)) as IDBRequest<AudioRecord[]>
+  );
+  db.close();
+  return result;
+}
+
+export async function deleteAudio(
+  bookId: string,
+  chapterId: string
+): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(AUDIO, 'readwrite');
+  tx.objectStore(AUDIO).delete(`${bookId}:${chapterId}`);
+  await transactionDone(tx);
+  db.close();
+}
+
+
+==========================================================================================
+FICHIER: src/lib/text.ts
+==========================================================================================
+
+import type { Chapter } from '../types';
+
+export function cleanExtractedText(input: string): string {
+  return input
+    .replace(/\r/g, '')
+    .replace(/([a-zà-öø-ÿ])[-–]\n([a-zà-öø-ÿ])/gi, '$1$2')
+    .split('\n')
+    .map(line => line.replace(/[\t ]+/g, ' ').trim())
+    .filter(line => !/^\s*(page\s*)?\d{1,4}\s*$/i.test(line))
+    .join('\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim();
+}
+
+function wordsCount(text: string): number {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function makeChapter(title: string, text: string, index: number): Chapter {
+  const words = wordsCount(text);
+  return {
+    id: crypto.randomUUID(),
+    title: title.trim() || `Chapitre ${index + 1}`,
+    text: text.trim(),
+    words,
+    estimatedMinutes: Math.max(1, Math.round(words / 165)),
+  };
+}
+
+function isHeading(line: string): boolean {
+  const value = line.trim();
+  if (!value || value.length > 110) return false;
+  return (
+    /^(chapitre|chapter|partie|part|prologue|épilogue|epilogue|introduction|conclusion|préface|preface|avant-propos|interlude)\b[\s\d:—–.-]*/i.test(
+      value
+    ) ||
+    /^\d{1,3}[.)-]\s+[A-ZÀ-ÖØ-Ý]/.test(value) ||
+    (/^[A-ZÀ-ÖØ-Ý0-9][A-ZÀ-ÖØ-Ý0-9 '\-–—,:]{3,70}$/.test(value) &&
+      value.split(/\s+/).length <= 10)
+  );
+}
+
+function smartBlocks(text: string, targetChars = 11500): string[] {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map(p => p.trim())
+    .filter(Boolean);
+  const result: string[] = [];
+  let current = '';
+  for (const paragraph of paragraphs) {
+    if (current && current.length + paragraph.length > targetChars) {
+      result.push(current.trim());
+      current = paragraph;
+    } else {
+      current += `${current ? '\n\n' : ''}${paragraph}`;
+    }
+  }
+  if (current.trim()) result.push(current.trim());
+  return result.length ? result : [text.trim()];
+}
+
+export function splitIntoChapters(text: string): Chapter[] {
+  const lines = text.split('\n');
+  const headings = lines
+    .map((line, index) => ({ line: line.trim(), index }))
+    .filter(({ line }) => isHeading(line));
+
+  if (headings.length >= 2) {
+    const chapters: Chapter[] = [];
+    if (headings[0].index > 2) {
+      const intro = lines.slice(0, headings[0].index).join('\n').trim();
+      if (intro.length > 160)
+        chapters.push(makeChapter('Ouverture', intro, chapters.length));
+    }
+    headings.forEach((heading, headingIndex) => {
+      const end =
+        headingIndex + 1 < headings.length
+          ? headings[headingIndex + 1].index
+          : lines.length;
+      const body = lines
+        .slice(heading.index + 1, end)
+        .join('\n')
+        .trim();
+      if (body.length > 60)
+        chapters.push(makeChapter(heading.line, body, chapters.length));
+    });
+    if (chapters.length >= 2) return chapters;
+  }
+
+  return smartBlocks(text).map((block, index) =>
+    makeChapter(`Chapitre ${index + 1}`, block, index)
+  );
+}
+
+export function chunkForSpeech(text: string, maxChars = 650): string[] {
+  const sentences = text
+    .replace(/\n+/g, ' ')
+    .match(/[^.!?…]+[.!?…]+|[^.!?…]+$/g) ?? [text];
+  const chunks: string[] = [];
+  let current = '';
+  for (const raw of sentences) {
+    const sentence = raw.trim();
+    if (!sentence) continue;
+    if (sentence.length > maxChars) {
+      if (current) {
+        chunks.push(current.trim());
+        current = '';
+      }
+      const words = sentence.split(/\s+/);
+      let part = '';
+      for (const word of words) {
+        if (part && part.length + word.length + 1 > maxChars) {
+          chunks.push(part.trim());
+          part = word;
+        } else {
+          part += `${part ? ' ' : ''}${word}`;
+        }
+      }
+      if (part) chunks.push(part.trim());
+    } else if (current && current.length + sentence.length + 1 > maxChars) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += `${current ? ' ' : ''}${sentence}`;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+export function formatBytes(bytes: number): string {
+  if (!bytes) return '—';
+  const units = ['o', 'Ko', 'Mo', 'Go'];
+  const index = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1
+  );
+  return `${(bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+export function sanitizeFileName(value: string): string {
+  return (
+    value
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 90) || 'livre-audio'
+  );
+}
+
+
+==========================================================================================
+FICHIER: src/lib/pdf.ts
+==========================================================================================
+
+import * as pdfjsLib from 'pdfjs-dist';
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import type { ImportProgress } from '../types';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+type PdfOptions = {
+  autoOcr: boolean;
+  ocrLang: 'fra' | 'eng' | 'fra+eng';
+  requestPassword?: (incorrect: boolean) => Promise<string | null>;
+};
+
+type PdfResult = {
+  text: string;
+  pages: number;
+  ocrUsed: boolean;
+};
+
+class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
+  private readonly file: File;
+  private aborted = false;
+
+  constructor(file: File) {
+    super(file.size, null, false, file.name);
+    this.file = file;
+  }
+
+  requestDataRange(begin: number, end: number): void {
+    if (this.aborted) return;
+    void this.file
+      .slice(begin, end)
+      .arrayBuffer()
+      .then(buffer => {
+        if (!this.aborted) this.onDataRange(begin, new Uint8Array(buffer));
+      })
+      .catch(error => {
+        console.error('Lecture locale du PDF impossible', error);
+        if (!this.aborted) this.onDataRange(begin, null);
+      });
+  }
+
+  abort(): void {
+    this.aborted = true;
+  }
+}
+
+function textFromContent(items: Array<unknown>): string {
+  let result = '';
+  for (const item of items) {
+    if (typeof item === 'object' && item !== null && 'str' in item) {
+      const typed = item as { str: string; hasEOL?: boolean };
+      result += typed.str;
+      result += typed.hasEOL ? '\n' : ' ';
+    }
+  }
+  return result.trim();
+}
+
+export async function renderPdfPageImage(
+  file: File,
+  pageNumber: number,
+  requestPassword?: (incorrect: boolean) => Promise<string | null>
+): Promise<Blob> {
+  const rangeTransport = new LocalFileRangeTransport(file);
+  const loadingTask = pdfjsLib.getDocument({
+    range: rangeTransport,
+    rangeChunkSize: 1024 * 1024,
+    disableAutoFetch: true,
+    disableStream: true,
+  });
+  loadingTask.onPassword = (updatePassword, reason) => {
+    void (async () => {
+      const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+      const password = requestPassword ? await requestPassword(incorrect) : null;
+      if (password) updatePassword(password);
+      else updatePassword(new Error('Ouverture du PDF annulée.'));
+    })();
+  };
+  let canvas: HTMLCanvasElement | null = null;
+  try {
+    const pdf = await loadingTask.promise;
+    if (pageNumber < 1 || pageNumber > pdf.numPages) throw new Error('Page PDF invalide.');
+    const page = await pdf.getPage(pageNumber);
+    try {
+      const viewport = page.getViewport({ scale: 1.55 });
+      canvas = globalThis.document.createElement('canvas');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('Impossible de préparer la page pour l’OCR cloud.');
+      await page.render({ canvasContext: context, viewport }).promise;
+      return await new Promise<Blob>((resolve, reject) => canvas!.toBlob(blob => blob ? resolve(blob) : reject(new Error('Impossible de convertir la page en image.')), 'image/jpeg', 0.86));
+    } finally {
+      page.cleanup();
+    }
+  } finally {
+    if (canvas) { canvas.width = 0; canvas.height = 0; canvas.remove(); }
+    rangeTransport.abort();
+    await loadingTask.destroy().catch(() => undefined);
+  }
+}
+
+export async function extractPdf(
+  file: File,
+  options: PdfOptions,
+  onProgress: (progress: ImportProgress) => void
+): Promise<PdfResult> {
+  onProgress({ stage: 'Ouverture du PDF par blocs', progress: 2 });
+  const rangeTransport = new LocalFileRangeTransport(file);
+  const loadingTask = pdfjsLib.getDocument({
+    range: rangeTransport,
+    rangeChunkSize: 1024 * 1024,
+    disableAutoFetch: true,
+    disableStream: true,
+  });
+
+  loadingTask.onProgress = progress => {
+    if (!progress.total) return;
+    const ratio = Math.max(0, Math.min(1, progress.loaded / progress.total));
+    onProgress({
+      stage: 'Lecture des données nécessaires',
+      progress: Math.max(2, Math.min(7, Math.round(ratio * 7))),
+    });
+  };
+
+  loadingTask.onPassword = (updatePassword, reason) => {
+    void (async () => {
+      const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+      const password = options.requestPassword
+        ? await options.requestPassword(incorrect)
+        : null;
+      if (password) {
+        updatePassword(password);
+      } else {
+        updatePassword(new Error('Ouverture du PDF annulée.'));
+      }
+    })();
+  };
+
+  const pageTexts: string[] = [];
+  let ocrUsed = false;
+  let ocrWorker: Awaited<
+    ReturnType<(typeof import('tesseract.js'))['createWorker']>
+  > | null = null;
+
+  try {
+    const pdfDocument = await loadingTask.promise;
+
+    for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+      const page = await pdfDocument.getPage(pageNumber);
+      let canvas: HTMLCanvasElement | null = null;
+
+      try {
+        const content = await page.getTextContent();
+        let pageText = textFromContent(content.items as Array<unknown>);
+        const shouldOcr =
+          options.autoOcr && pageText.replace(/\s/g, '').length < 70;
+
+        if (shouldOcr) {
+          if (!ocrWorker) {
+            onProgress({
+              stage: 'Chargement de l’OCR local',
+              progress: Math.max(
+                8,
+                Math.round((pageNumber / pdfDocument.numPages) * 70)
+              ),
+            });
+            const { createWorker } = await import('tesseract.js');
+            ocrWorker = await createWorker(options.ocrLang);
+          }
+
+          const viewport = page.getViewport({ scale: 1.55 });
+          canvas = globalThis.document.createElement('canvas');
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const context = canvas.getContext('2d', { alpha: false });
+          if (!context)
+            throw new Error('Impossible de préparer cette page pour l’OCR.');
+
+          await page.render({ canvasContext: context, viewport }).promise;
+          const recognition = await ocrWorker.recognize(canvas);
+          if (recognition.data.text.trim().length > pageText.trim().length)
+            pageText = recognition.data.text.trim();
+          ocrUsed = true;
+        }
+
+        pageTexts.push(pageText);
+        onProgress({
+          stage: shouldOcr
+            ? `OCR de la page ${pageNumber}/${pdfDocument.numPages}`
+            : `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
+          progress:
+            8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
+        });
+      } finally {
+        if (canvas) {
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas.remove();
+        }
+        page.cleanup();
+      }
+    }
+
+    onProgress({
+      stage: 'Nettoyage et création des chapitres',
+      progress: 95,
+    });
+    return {
+      text: pageTexts.join('\n\n'),
+      pages: pdfDocument.numPages,
+      ocrUsed,
+    };
+  } finally {
+    if (ocrWorker) await ocrWorker.terminate();
+    rangeTransport.abort();
+    await loadingTask.destroy().catch(() => undefined);
+  }
+}
+
+
+==========================================================================================
+FICHIER: src/lib/tts.ts
+==========================================================================================
+
+import { zipSync } from 'fflate';
+import { chunkForSpeech, sanitizeFileName } from './text';
+
+export type VoiceCatalogItem = {
+  id: string;
+  label: string;
+  language: string;
+};
+
+type WavMeta = {
+  channels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+  byteRate: number;
+  blockAlign: number;
+  audioFormat: number;
+  data: Uint8Array;
+};
+
+function parseWav(buffer: ArrayBuffer): WavMeta {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const four = (offset: number) =>
+    String.fromCharCode(
+      bytes[offset],
+      bytes[offset + 1],
+      bytes[offset + 2],
+      bytes[offset + 3]
+    );
+  if (four(0) !== 'RIFF' || four(8) !== 'WAVE')
+    throw new Error('Le moteur vocal a renvoyé un audio WAV invalide.');
+  let offset = 12;
+  let format: Omit<WavMeta, 'data'> | null = null;
+  let data: Uint8Array | null = null;
+  while (offset + 8 <= buffer.byteLength) {
+    const id = four(offset);
+    const size = view.getUint32(offset + 4, true);
+    const payload = offset + 8;
+    if (id === 'fmt ' && size >= 16) {
+      format = {
+        audioFormat: view.getUint16(payload, true),
+        channels: view.getUint16(payload + 2, true),
+        sampleRate: view.getUint32(payload + 4, true),
+        byteRate: view.getUint32(payload + 8, true),
+        blockAlign: view.getUint16(payload + 12, true),
+        bitsPerSample: view.getUint16(payload + 14, true),
+      };
+    }
+    if (id === 'data')
+      data = bytes.slice(payload, Math.min(payload + size, bytes.length));
+    offset = payload + size + (size % 2);
+  }
+  if (!format || !data) throw new Error('Impossible de décoder le WAV généré.');
+  return { ...format, data };
+}
+
+function writeAscii(view: DataView, offset: number, text: string): void {
+  for (let i = 0; i < text.length; i += 1)
+    view.setUint8(offset + i, text.charCodeAt(i));
+}
+
+async function mergeWavBlobs(
+  blobs: Blob[]
+): Promise<{ blob: Blob; duration: number }> {
+  if (!blobs.length) throw new Error('Aucun segment audio généré.');
+  const parsed = await Promise.all(
+    blobs.map(async blob => parseWav(await blob.arrayBuffer()))
+  );
+  const first = parsed[0];
+  for (const wav of parsed) {
+    if (
+      wav.sampleRate !== first.sampleRate ||
+      wav.channels !== first.channels ||
+      wav.bitsPerSample !== first.bitsPerSample
+    ) {
+      throw new Error('Les segments audio n’utilisent pas le même format.');
+    }
+  }
+  const silenceBytes =
+    Math.floor((first.byteRate * 0.12) / first.blockAlign) * first.blockAlign;
+  const totalAudioBytes =
+    parsed.reduce((sum, wav) => sum + wav.data.length, 0) +
+    silenceBytes * Math.max(0, parsed.length - 1);
+  const output = new ArrayBuffer(44 + totalAudioBytes);
+  const view = new DataView(output);
+  const bytes = new Uint8Array(output);
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + totalAudioBytes, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, first.audioFormat, true);
+  view.setUint16(22, first.channels, true);
+  view.setUint32(24, first.sampleRate, true);
+  view.setUint32(28, first.byteRate, true);
+  view.setUint16(32, first.blockAlign, true);
+  view.setUint16(34, first.bitsPerSample, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, totalAudioBytes, true);
+  let cursor = 44;
+  parsed.forEach((wav, index) => {
+    bytes.set(wav.data, cursor);
+    cursor += wav.data.length;
+    if (index < parsed.length - 1) cursor += silenceBytes;
+  });
+  return {
+    blob: new Blob([output], { type: 'audio/wav' }),
+    duration: totalAudioBytes / first.byteRate,
+  };
+}
+
+export async function getVoiceCatalog(): Promise<VoiceCatalogItem[]> {
+  const piper = await import('@mintplex-labs/piper-tts-web');
+  const raw = await piper.voices();
+  return Object.keys(raw)
+    .filter(id => /^(fr_|en_|es_)/i.test(id))
+    .sort((a, b) => a.localeCompare(b))
+    .map(id => {
+      const language = id.startsWith('fr_')
+        ? 'Français'
+        : id.startsWith('es_')
+          ? 'Espagnol'
+          : 'Anglais';
+      const label = id.replace(/_/g, ' ').replace(/-/g, ' · ');
+      return { id, label, language };
+    });
+}
+
+export async function getStoredVoices(): Promise<string[]> {
+  const piper = await import('@mintplex-labs/piper-tts-web');
+  return piper.stored();
+}
+
+export async function downloadVoice(
+  voiceId: string,
+  onProgress: (value: number) => void
+): Promise<void> {
+  const piper = await import('@mintplex-labs/piper-tts-web');
+  await piper.download(voiceId, progress => {
+    if (progress.loaded !== undefined && progress.total)
+      onProgress(
+        Math.max(
+          0,
+          Math.min(100, Math.round((progress.loaded / progress.total) * 100))
+        )
+      );
+  });
+  onProgress(100);
+}
+
+export async function removeVoice(voiceId: string): Promise<void> {
+  const piper = await import('@mintplex-labs/piper-tts-web');
+  await piper.remove(voiceId);
+}
+
+export async function synthesizeChapter(
+  text: string,
+  voiceId: string,
+  onProgress: (value: number, label: string) => void,
+  shouldCancel: () => boolean
+): Promise<{ blob: Blob; duration: number }> {
+  const piper = await import('@mintplex-labs/piper-tts-web');
+  const chunks = chunkForSpeech(text);
+  const blobs: Blob[] = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (shouldCancel()) throw new Error('Génération annulée.');
+    onProgress(
+      Math.round((index / chunks.length) * 100),
+      `Synthèse ${index + 1}/${chunks.length}`
+    );
+    const wav = await piper.predict(
+      { text: chunks[index], voiceId },
+      progress => {
+        if (progress.loaded !== undefined && progress.total) {
+          const downloadPart = progress.loaded / progress.total;
+          onProgress(
+            Math.round(((index + downloadPart) / chunks.length) * 100),
+            `Préparation de la voix · ${Math.round(downloadPart * 100)} %`
+          );
+        }
+      }
+    );
+    blobs.push(wav);
+  }
+  onProgress(96, 'Assemblage du chapitre');
+  const merged = await mergeWavBlobs(blobs);
+  onProgress(100, 'Chapitre prêt');
+  return merged;
+}
+
+export async function makeBookZip(
+  _title: string,
+  items: Array<{ index: number; title: string; blob: Blob }>
+): Promise<Blob> {
+  const entries: Record<string, Uint8Array> = {};
+  for (const item of items) {
+    const prefix = String(item.index + 1).padStart(2, '0');
+    entries[`${prefix} - ${sanitizeFileName(item.title)}.wav`] = new Uint8Array(
+      await item.blob.arrayBuffer()
+    );
+  }
+  const zipped = zipSync(entries, { level: 0 });
+  return new Blob(
+    [
+      zipped.buffer.slice(
+        zipped.byteOffset,
+        zipped.byteOffset + zipped.byteLength
+      ) as ArrayBuffer,
+    ],
+    { type: 'application/zip' }
+  );
+}
+
+
+==========================================================================================
+FICHIER: backend/index.ts
+==========================================================================================
+
+import { ai, db, error, json, router, storage } from '@appdeploy/sdk';
+import { Buffer } from 'node:buffer';
+import { PDFDataRangeTransport, getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+
+type JobStatus = 'uploading' | 'queued' | 'processing' | 'waiting_ocr' | 'text_ready' | 'generating_audio' | 'complete' | 'failed' | 'password_protected';
+
+type JobRecord = {
+  title: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  chunkSize: number;
+  totalParts: number;
+  status: JobStatus;
+  pages: number;
+  nextPage: number;
+  chapterIds: string[];
+  audioReady: number;
+  needsOcrPage: number | null;
+  error: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type ChapterRecord = {
+  jobId: string;
+  index: number;
+  title: string;
+  text: string;
+  words: number;
+  estimatedMinutes: number;
+  pageStart: number;
+  pageEnd: number;
+  audioPath: string;
+  audioMimeType: string;
+  createdAt: number;
+};
+
+const JOBS = 'cloud_jobs';
+const CHAPTERS = 'cloud_chapters';
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
+const PROCESS_PAGES = 4;
+const MAX_CHAPTER_CHARS = 5200;
+
+function cleanText(input: string): string {
+  return input.replace(/\r/g, '').replace(/([a-zà-öø-ÿ])[-–]\n([a-zà-öø-ÿ])/gi, '$1$2').replace(/[\t ]+/g, ' ').replace(/\n{4,}/g, '\n\n').trim();
+}
+
+function wordsCount(text: string): number {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function guessTitle(text: string, fallback: string): string {
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const heading = lines.find(line => line.length <= 100 && /^(chapitre|chapter|partie|part|prologue|épilogue|epilogue|introduction|conclusion|préface|preface|avant-propos|interlude)\b/i.test(line));
+  return heading || fallback;
+}
+
+function splitForAudio(text: string): string[] {
+  const paragraphs = text.split(/\n{2,}/).map(part => part.trim()).filter(Boolean);
+  const result: string[] = [];
+  let current = '';
+  const pushLong = (value: string) => {
+    const sentences = value.match(/[^.!?…]+[.!?…]+|[^.!?…]+$/g) ?? [value];
+    let block = '';
+    for (const sentence of sentences) {
+      const candidate = `${block}${block ? ' ' : ''}${sentence.trim()}`;
+      if (candidate.length > MAX_CHAPTER_CHARS && block) {
+        result.push(block.trim());
+        block = sentence.trim();
+      } else {
+        block = candidate;
+      }
+    }
+    if (block.trim()) result.push(block.trim());
+  };
+  for (const paragraph of paragraphs) {
+    if (paragraph.length > MAX_CHAPTER_CHARS) {
+      if (current.trim()) result.push(current.trim());
+      current = '';
+      pushLong(paragraph);
+      continue;
+    }
+    const candidate = `${current}${current ? '\n\n' : ''}${paragraph}`;
+    if (candidate.length > MAX_CHAPTER_CHARS && current) {
+      result.push(current.trim());
+      current = paragraph;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.trim()) result.push(current.trim());
+  return result.length ? result : [text.trim()].filter(Boolean);
+}
+
+async function getJob(id: string): Promise<JobRecord | null> {
+  const [job] = await db.get<JobRecord>(JOBS, [id]);
+  return job;
+}
+
+async function updateJob(id: string, job: JobRecord, patch: Partial<JobRecord>): Promise<JobRecord> {
+  const updated: JobRecord = { ...job, ...patch, updatedAt: Date.now() };
+  const [ok] = await db.update(JOBS, [{ id, record: { ...updated } }]);
+  if (!ok) throw new Error('Impossible de mettre à jour le traitement cloud.');
+  return updated;
+}
+
+function partPath(jobId: string, index: number): string {
+  return `cloud/${jobId}/parts/${String(index).padStart(6, '0')}.part`;
+}
+
+function ocrPath(jobId: string, pageNumber: number): string {
+  return `cloud/${jobId}/ocr/${String(pageNumber).padStart(6, '0')}.txt`;
+}
+
+async function readStoredRange(jobId: string, begin: number, end: number, chunkSize: number): Promise<Uint8Array> {
+  const first = Math.floor(begin / chunkSize);
+  const last = Math.floor(Math.max(begin, end - 1) / chunkSize);
+  const paths: string[] = [];
+  for (let index = first; index <= last; index += 1) paths.push(partPath(jobId, index));
+  const files = await storage.read(paths);
+  const pieces = files.map((file, offset) => {
+    if (!file.content) throw new Error(`Bloc cloud manquant : ${first + offset}`);
+    return Buffer.from(file.content, 'base64');
+  });
+  const startOffset = begin - first * chunkSize;
+  const required = end - begin;
+  const combined = Buffer.concat(pieces);
+  return new Uint8Array(combined.subarray(startOffset, startOffset + required));
+}
+
+class StoredPdfRangeTransport extends PDFDataRangeTransport {
+  private stopped = false;
+  constructor(private readonly jobId: string, private readonly fileSize: number, private readonly chunkSize: number) {
+    super(fileSize, null, false, jobId);
+  }
+  requestDataRange(begin: number, end: number): void {
+    if (this.stopped) return;
+    void readStoredRange(this.jobId, begin, end, this.chunkSize)
+      .then(bytes => {
+        if (!this.stopped) (this as unknown as { onDataRange: (start: number, chunk: Uint8Array) => void }).onDataRange(begin, bytes);
+      })
+      .catch(err => console.error('cloud_range_read_failed', err));
+  }
+  abort(): void {
+    this.stopped = true;
+  }
+}
+
+function textFromItems(items: Array<unknown>): string {
+  let result = '';
+  for (const item of items) {
+    if (typeof item === 'object' && item !== null && 'str' in item) {
+      const typed = item as { str: string; hasEOL?: boolean };
+      result += typed.str;
+      result += typed.hasEOL ? '\n' : ' ';
+    }
+  }
+  return cleanText(result);
+}
+
+async function persistChapterBlocks(jobId: string, job: JobRecord, text: string, pageStart: number, pageEnd: number): Promise<JobRecord> {
+  const blocks = splitForAudio(cleanText(text));
+  if (!blocks.length) return job;
+  const records = blocks.map((block, offset) => {
+    const words = wordsCount(block);
+    const fallback = pageStart === pageEnd ? `Page ${pageStart}` : `Pages ${pageStart}–${pageEnd}`;
+    const record: ChapterRecord = {
+      jobId,
+      index: job.chapterIds.length + offset,
+      title: guessTitle(block, blocks.length > 1 ? `${fallback} · ${offset + 1}` : fallback),
+      text: block,
+      words,
+      estimatedMinutes: Math.max(1, Math.round(words / 165)),
+      pageStart,
+      pageEnd,
+      audioPath: '',
+      audioMimeType: '',
+      createdAt: Date.now(),
+    };
+    return record;
+  });
+  const ids = await db.add(CHAPTERS, records.map(record => ({ ...record })));
+  const added = ids.filter((id): id is string => Boolean(id));
+  if (added.length !== records.length) throw new Error('Impossible d’enregistrer tous les chapitres cloud.');
+  return { ...job, chapterIds: [...job.chapterIds, ...added] };
+}
+
+async function processJobBatch(jobId: string, sourceJob: JobRecord, maxPages = PROCESS_PAGES): Promise<JobRecord> {
+  let job = sourceJob;
+  if (!['queued', 'processing', 'waiting_ocr'].includes(job.status)) return job;
+  const transport = new StoredPdfRangeTransport(jobId, job.size, job.chunkSize);
+  const loadingTask = getDocument({
+    range: transport,
+    rangeChunkSize: job.chunkSize,
+    disableAutoFetch: true,
+    disableStream: true,
+  });
+  try {
+    const pdf = await loadingTask.promise;
+    const pages = job.pages || pdf.numPages;
+    let pageNumber = Math.max(1, job.nextPage || 1);
+    const startPage = pageNumber;
+    const texts: string[] = [];
+    let processed = 0;
+
+    while (pageNumber <= pages && processed < maxPages) {
+      const [ocrFile] = await storage.read([ocrPath(jobId, pageNumber)]);
+      let pageText = ocrFile?.content ? cleanText(ocrFile.content) : '';
+      if (!pageText) {
+        const page = await pdf.getPage(pageNumber);
+        try {
+          const content = await page.getTextContent();
+          pageText = textFromItems(content.items as Array<unknown>);
+        } finally {
+          page.cleanup();
+        }
+      }
+
+      if (pageText.replace(/\s/g, '').length < 60) {
+        if (texts.length) job = await persistChapterBlocks(jobId, job, texts.join('\n\n'), startPage, pageNumber - 1);
+        return updateJob(jobId, job, {
+          pages,
+          nextPage: pageNumber,
+          status: 'waiting_ocr',
+          needsOcrPage: pageNumber,
+          error: '',
+        });
+      }
+
+      texts.push(pageText);
+      pageNumber += 1;
+      processed += 1;
+    }
+
+    if (texts.length) job = await persistChapterBlocks(jobId, job, texts.join('\n\n'), startPage, pageNumber - 1);
+    const finished = pageNumber > pages;
+    return updateJob(jobId, job, {
+      pages,
+      nextPage: pageNumber,
+      status: finished ? 'text_ready' : 'processing',
+      needsOcrPage: null,
+      error: '',
+    });
+  } finally {
+    transport.abort();
+    await loadingTask.destroy().catch(() => undefined);
+  }
+}
+
+function configuredProvider(): 'deepinfra' | 'gemini' | '' {
+  if (process.env.DEEPINFRA_API_KEY) return 'deepinfra';
+  if (process.env.GEMINI_API_KEY) return 'gemini';
+  return '';
+}
+
+async function deepInfraTts(text: string): Promise<{ base64: string; mimeType: string; extension: string }> {
+  const key = process.env.DEEPINFRA_API_KEY;
+  if (!key) throw new Error('Clé DeepInfra absente.');
+  const response = await fetch('https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M', {
+    method: 'POST',
+    headers: { Authorization: `bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, tts_response_format: 'mp3', preset_voice: ['ff_siwis'], speed: 1, stream: false }),
+  });
+  if (!response.ok) throw new Error(`DeepInfra TTS ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as { audio?: string };
+  if (!payload.audio) throw new Error('DeepInfra n’a renvoyé aucun audio.');
+  if (/^https?:\/\//.test(payload.audio)) {
+    const audioResponse = await fetch(payload.audio);
+    if (!audioResponse.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
+    return { base64: Buffer.from(await audioResponse.arrayBuffer()).toString('base64'), mimeType: 'audio/mpeg', extension: 'mp3' };
+  }
+  const base64 = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
+  return { base64, mimeType: 'audio/mpeg', extension: 'mp3' };
+}
+
+async function geminiTts(text: string): Promise<{ base64: string; mimeType: string; extension: string }> {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error('Clé Gemini absente.');
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3.8-flash-lite-tts',
+      input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style: 'Narration de livre audio naturelle, chaleureuse, claire et régulière en français.' }] }] }],
+      response_format: { type: 'audio' },
+      generation_config: { speech_config: [{ voice: 'Kore' }] },
+    }),
+  });
+  if (!response.ok) throw new Error(`Gemini TTS ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as { steps?: Array<{ type?: string; content?: Array<{ type?: string; data?: string; mime_type?: string }> }> };
+  const audio = payload.steps?.flatMap(step => step.content ?? []).filter(content => content.type === 'audio').at(-1);
+  if (!audio?.data) throw new Error('Gemini n’a renvoyé aucun audio.');
+  return { base64: audio.data, mimeType: audio.mime_type || 'audio/wav', extension: 'wav' };
+}
+
+async function generateNextAudio(jobId: string, sourceJob: JobRecord): Promise<JobRecord> {
+  const provider = configuredProvider();
+  if (!provider || !sourceJob.chapterIds.length) return sourceJob;
+  const chapterRecords = await db.get<ChapterRecord>(CHAPTERS, sourceJob.chapterIds);
+  const pendingIndex = chapterRecords.findIndex(chapter => chapter && !chapter.audioPath);
+  if (pendingIndex < 0) {
+    return updateJob(jobId, sourceJob, { status: sourceJob.nextPage > sourceJob.pages && sourceJob.pages > 0 ? 'complete' : sourceJob.status, audioReady: sourceJob.chapterIds.length });
+  }
+  const chapter = chapterRecords[pendingIndex];
+  if (!chapter) return sourceJob;
+  const chapterId = sourceJob.chapterIds[pendingIndex];
+  const audio = provider === 'deepinfra' ? await deepInfraTts(chapter.text) : await geminiTts(chapter.text);
+  const path = `cloud/${jobId}/audio/${String(pendingIndex).padStart(5, '0')}.${audio.extension}`;
+  const [written] = await storage.write([{ path, content: audio.base64, contentType: audio.mimeType }]);
+  if (!written) throw new Error('Impossible de stocker l’audio généré.');
+  const [updated] = await db.update(CHAPTERS, [{ id: chapterId, record: { ...chapter, audioPath: path, audioMimeType: audio.mimeType } }]);
+  if (!updated) throw new Error('Impossible d’enregistrer l’état audio du chapitre.');
+  const audioReady = sourceJob.audioReady + 1;
+  const allTextReady = sourceJob.pages > 0 && sourceJob.nextPage > sourceJob.pages;
+  const allAudioReady = audioReady >= sourceJob.chapterIds.length && allTextReady;
+  return updateJob(jobId, sourceJob, { audioReady, status: allAudioReady ? 'complete' : allTextReady ? 'generating_audio' : sourceJob.status });
+}
+
+async function publicJob(jobId: string, job: JobRecord) {
+  const records = job.chapterIds.length ? await db.get<ChapterRecord>(CHAPTERS, job.chapterIds) : [];
+  const audioPaths = records.flatMap(record => record?.audioPath ? [record.audioPath] : []);
+  const signed = audioPaths.length ? await storage.url(audioPaths) : [];
+  const urlMap = new Map(signed.map(item => [item.path, item.url]));
+  const chapters = records.flatMap((record, index) => record ? [{
+    id: job.chapterIds[index],
+    title: record.title,
+    text: record.text,
+    words: record.words,
+    estimatedMinutes: record.estimatedMinutes,
+    pageStart: record.pageStart,
+    pageEnd: record.pageEnd,
+    audioUrl: record.audioPath ? urlMap.get(record.audioPath) : undefined,
+    audioMimeType: record.audioMimeType || undefined,
+  }] : []);
+  const provider = configuredProvider();
+  return {
+    id: jobId,
+    title: job.title,
+    name: job.name,
+    size: job.size,
+    status: job.status,
+    pages: job.pages,
+    nextPage: job.nextPage,
+    processingProgress: job.pages ? Math.min(100, Math.round(((Math.min(job.nextPage, job.pages + 1) - 1) / job.pages) * 100)) : 0,
+    audioReady: job.audioReady,
+    ttsConfigured: Boolean(provider),
+    ttsProvider: provider || 'local-fallback',
+    needsOcrPage: job.needsOcrPage,
+    error: job.error || undefined,
+    chapters,
+  };
+}
+
+async function statusResponse(jobId: string) {
+  const job = await getJob(jobId);
+  if (!job) return error('Traitement cloud introuvable.', 404);
+  return json(await publicJob(jobId, job));
+}
+
+export const handler = router({
+  'GET /api/_healthcheck': [async () => json({ message: 'Success' })],
+  'GET /api/cloud/capabilities': [async () => json({ cloud: true, chunkUpload: true, ocr: true, ttsConfigured: Boolean(configuredProvider()), ttsProvider: configuredProvider() || 'local-fallback' })],
+  'POST /api/cloud/jobs': [async ({ body }) => {
+    const input = body as { name?: string; title?: string; size?: number; mimeType?: string };
+    if (!input.name || !input.size || input.size <= 0) return error('Fichier PDF invalide.', 400);
+    const totalParts = Math.ceil(input.size / UPLOAD_CHUNK_SIZE);
+    const record: JobRecord = {
+      title: input.title || input.name.replace(/\.pdf$/i, ''),
+      name: input.name,
+      size: input.size,
+      mimeType: input.mimeType || 'application/pdf',
+      chunkSize: UPLOAD_CHUNK_SIZE,
+      totalParts,
+      status: 'uploading',
+      pages: 0,
+      nextPage: 1,
+      chapterIds: [],
+      audioReady: 0,
+      needsOcrPage: null,
+      error: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const [id] = await db.add(JOBS, [{ ...record }]);
+    if (!id) return error('Impossible de créer la tâche cloud.', 500);
+    return json({ id, chunkSize: UPLOAD_CHUNK_SIZE, totalParts });
+  }],
+  'POST /api/cloud/jobs/:id/chunk': [async ({ params, body }) => {
+    const job = await getJob(params.id);
+    if (!job) return error('Tâche introuvable.', 404);
+    const input = body as { index?: number; data?: string };
+    if (!Number.isInteger(input.index) || !input.data || (input.index as number) < 0 || (input.index as number) >= job.totalParts) return error('Bloc invalide.', 400);
+    const [ok] = await storage.write([{ path: partPath(params.id, input.index as number), content: input.data, contentType: 'application/octet-stream' }]);
+    if (!ok) return error('Échec de stockage du bloc.', 500);
+    return json({ ok: true, index: input.index });
+  }],
+  'POST /api/cloud/jobs/:id/complete': [async ({ params }) => {
+    const job = await getJob(params.id);
+    if (!job) return error('Tâche introuvable.', 404);
+    const checks = await storage.read([partPath(params.id, 0), partPath(params.id, Math.max(0, job.totalParts - 1))]);
+    if (checks.some(item => !item.content)) return error('Le transfert cloud est incomplet. Relance l’import.', 409);
+    const updated = await updateJob(params.id, job, { status: 'queued', error: '' });
+    return json(await publicJob(params.id, updated));
+  }],
+  'GET /api/cloud/jobs/:id': [async ({ params }) => statusResponse(params.id)],
+  'POST /api/cloud/jobs/:id/process-next': [async ({ params }) => {
+    const job = await getJob(params.id);
+    if (!job) return error('Tâche introuvable.', 404);
+    try {
+      const updated = await processJobBatch(params.id, job);
+      return json(await publicJob(params.id, updated));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erreur de lecture PDF cloud.';
+      const protectedPdf = /password|mot de passe/i.test(message);
+      const failed = await updateJob(params.id, job, { status: protectedPdf ? 'password_protected' : 'failed', error: message });
+      console.error('cloud_pdf_process_failed', err);
+      return json(await publicJob(params.id, failed));
+    }
+  }],
+  'POST /api/cloud/jobs/:id/ocr-page': [async ({ params, body }) => {
+    const job = await getJob(params.id);
+    if (!job) return error('Tâche introuvable.', 404);
+    const input = body as { pageNumber?: number; image?: { data?: string; mimeType?: string } };
+    const pageNumber = input.pageNumber ?? 0;
+    if (!pageNumber || !input.image?.data || !input.image.mimeType) return error('Page OCR invalide.', 400);
+    const result = await ai.ocr({
+      images: [{ data: input.image.data, mimeType: input.image.mimeType }],
+      prompt: 'Transcris fidèlement tout le texte lisible de cette page de livre. Respecte les paragraphes. N’ajoute aucun commentaire.',
+      thinkingMode: 'NONE',
+      temperature: 0,
+      maxTokens: 8192,
+    });
+    const text = cleanText(result.text);
+    if (text.length < 10) return error('OCR insuffisant sur cette page.', 422);
+    const [written] = await storage.write([{ path: ocrPath(params.id, pageNumber), content: text, contentType: 'text/plain; charset=utf-8' }]);
+    if (!written) return error('Impossible de stocker le résultat OCR.', 500);
+    const updated = await updateJob(params.id, job, { status: 'processing', needsOcrPage: null, error: '' });
+    return json(await publicJob(params.id, updated));
+  }],
+  'POST /api/cloud/jobs/:id/tts-next': [async ({ params }) => {
+    const job = await getJob(params.id);
+    if (!job) return error('Tâche introuvable.', 404);
+    if (!configuredProvider()) return json(await publicJob(params.id, job));
+    try {
+      const updated = await generateNextAudio(params.id, job);
+      return json(await publicJob(params.id, updated));
+    } catch (err) {
+      console.error('cloud_tts_failed', err);
+      return error(err instanceof Error ? err.message : 'Génération audio cloud impossible.', 502);
+    }
+  }],
+  'DELETE /api/cloud/jobs/:id': [async ({ params }) => {
+    const job = await getJob(params.id);
+    if (!job) return json({ deleted: true });
+    const chapterRecords = job.chapterIds.length ? await db.get<ChapterRecord>(CHAPTERS, job.chapterIds) : [];
+    const paths: string[] = [];
+    for (let index = 0; index < job.totalParts; index += 1) paths.push(partPath(params.id, index));
+    chapterRecords.forEach(record => { if (record?.audioPath) paths.push(record.audioPath); });
+    for (let page = 1; page <= Math.max(job.pages, job.nextPage); page += 1) paths.push(ocrPath(params.id, page));
+    for (let start = 0; start < paths.length; start += 100) await storage.delete(paths.slice(start, start + 100));
+    if (job.chapterIds.length) await db.delete(CHAPTERS, job.chapterIds);
+    await db.delete(JOBS, [params.id]);
+    return json({ deleted: true });
+  }],
+});
+
+export const cloudWorker = async () => {
+  const { items } = await db.list<JobRecord>(JOBS, { limit: 20 });
+  const active = items.filter(job => ['queued', 'processing', 'text_ready', 'generating_audio'].includes(job.status)).slice(0, 3);
+  for (const item of active) {
+    const { id, ...jobData } = item;
+    let job = jobData as JobRecord;
+    try {
+      if (['queued', 'processing'].includes(job.status)) job = await processJobBatch(id, job, 2);
+      if (configuredProvider() && job.chapterIds.length > job.audioReady) await generateNextAudio(id, job);
+    } catch (err) {
+      console.error('cloud_worker_job_failed', id, err);
+    }
+  }
+  return { statusCode: 200 };
+};
+
+
+==========================================================================================
+FICHIER: src/index.css
+==========================================================================================
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+:root {
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  color: #eef2ff;
+  background: #070b16;
+  font-synthesis: none;
+}
+html,
+body,
+#root {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100%;
+  background: #070b16;
+}
+body {
+  min-height: 100vh;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.lv-app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 286px minmax(0, 1fr);
+  background:
+    radial-gradient(circle at 70% 0%, rgba(87, 67, 255, 0.14), transparent 32%),
+    #070b16;
+}
+.lv-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  border-right: 1px solid #1d2437;
+  background: rgba(9, 14, 28, 0.88);
+  backdrop-filter: blur(18px);
+  padding: 22px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  z-index: 4;
+}
+.lv-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 2px 8px;
+}
+.lv-logo {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7c5cff, #32d7a0);
+  color: white;
+  box-shadow: 0 10px 24px rgba(67, 220, 166, 0.16);
+}
+.lv-brand strong {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+.lv-brand small {
+  display: block;
+  color: #758099;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.lv-primary {
+  width: 100%;
+  border: 0;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7b61ff, #5e78ff);
+  color: white;
+  padding: 12px 15px;
+  font-weight: 760;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  box-shadow: 0 12px 28px rgba(93, 87, 255, 0.2);
+}
+.lv-primary:hover {
+  filter: brightness(1.07);
+}
+.lv-secondary,
+.lv-ghost {
+  border: 1px solid #29324a;
+  background: #11182a;
+  color: #dce3f8;
+  border-radius: 11px;
+  padding: 10px 13px;
+  font-weight: 670;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.lv-secondary:hover,
+.lv-ghost:hover {
+  background: #151e34;
+  border-color: #3a4665;
+}
+.lv-ghost {
+  background: transparent;
+}
+.lv-danger {
+  border-color: #5c2935;
+  color: #ff9daa;
+}
+.lv-danger:hover {
+  background: #29151c;
+  border-color: #8f3e4e;
+}
+.lv-section-label {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: #66728c;
+  font-weight: 800;
+  padding: 0 9px;
+}
+.lv-books {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+  overflow: auto;
+}
+.lv-book-item {
+  border: 1px solid transparent;
+  background: transparent;
+  color: #bec8de;
+  border-radius: 12px;
+  padding: 10px;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+.lv-book-item:hover {
+  background: #10172a;
+}
+.lv-book-item.active {
+  background: #151a31;
+  border-color: #333c67;
+  color: white;
+}
+.lv-book-cover {
+  width: 36px;
+  height: 46px;
+  border-radius: 7px;
+  background: linear-gradient(160deg, #302a63, #18223d);
+  border: 1px solid #4a4c7e;
+  display: grid;
+  place-items: center;
+}
+.lv-book-copy {
+  min-width: 0;
+}
+.lv-book-copy strong,
+.lv-book-copy span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.lv-book-copy strong {
+  font-size: 13px;
+}
+.lv-book-copy span {
+  font-size: 11px;
+  margin-top: 4px;
+  color: #74809a;
+}
+.lv-sidebar-bottom {
+  margin-top: auto;
+}
+.lv-private-card {
+  border: 1px solid #1f3e39;
+  background: #0e201d;
+  color: #90e5c6;
+  padding: 11px;
+  border-radius: 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  display: flex;
+  gap: 8px;
+}
+.lv-main {
+  min-width: 0;
+  min-height: 100vh;
+}
+.lv-topbar {
+  height: 72px;
+  border-bottom: 1px solid #1b2335;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 28px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: rgba(7, 11, 22, 0.84);
+  backdrop-filter: blur(16px);
+}
+.lv-topbar-title {
+  min-width: 0;
+}
+.lv-topbar-title strong {
+  display: block;
+  font-size: 14px;
+  max-width: 52vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.lv-topbar-title span {
+  display: block;
+  color: #71809c;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.lv-top-actions {
+  display: flex;
+  gap: 8px;
+}
+.lv-icon-button {
+  width: 39px;
+  height: 39px;
+  border: 1px solid #273048;
+  border-radius: 11px;
+  background: #11182a;
+  color: #d7e0f4;
+  display: grid;
+  place-items: center;
+}
+.lv-icon-button:hover {
+  background: #182036;
+}
+.lv-content {
+  padding: 30px;
+  width: min(1240px, 100%);
+  margin: 0 auto;
+}
+.lv-empty {
+  min-height: calc(100vh - 132px);
+  display: grid;
+  place-items: center;
+}
+.lv-hero {
+  width: min(850px, 100%);
+  text-align: center;
+}
+.lv-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #28443e;
+  color: #8be8c6;
+  background: #0d211d;
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 750;
+}
+.lv-hero h1 {
+  margin: 18px auto 12px;
+  font-size: clamp(34px, 5.2vw, 66px);
+  max-width: 820px;
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+.lv-hero h1 em {
+  font-style: normal;
+  background: linear-gradient(90deg, #9a87ff, #5ae6b1);
+  color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+}
+.lv-hero p {
+  color: #8d99b3;
+  max-width: 650px;
+  margin: 0 auto 28px;
+  line-height: 1.65;
+  font-size: 15px;
+}
+.lv-drop {
+  border: 1px dashed #3b4665;
+  border-radius: 20px;
+  background: linear-gradient(
+    180deg,
+    rgba(24, 31, 55, 0.7),
+    rgba(13, 19, 35, 0.74)
+  );
+  padding: 34px 22px;
+  transition: 0.18s ease;
+}
+.lv-drop.dragging {
+  border-color: #7b61ff;
+  background: #171a35;
+  transform: translateY(-2px);
+}
+.lv-drop-icon {
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 14px;
+  border-radius: 17px;
+  display: grid;
+  place-items: center;
+  color: #b9acff;
+  background: #211d47;
+  border: 1px solid #3c356f;
+}
+.lv-drop strong {
+  display: block;
+  font-size: 16px;
+}
+.lv-drop span {
+  display: block;
+  color: #78849e;
+  font-size: 12px;
+  margin: 6px 0 16px;
+}
+.lv-drop-actions {
+  display: flex;
+  justify-content: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.lv-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+  text-align: left;
+}
+.lv-feature {
+  border: 1px solid #1e283d;
+  background: #0d1323;
+  border-radius: 14px;
+  padding: 14px;
+  color: #8c98b1;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.lv-feature strong {
+  display: flex;
+  color: #dce4f7;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.lv-book-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+.lv-book-heading {
+  display: flex;
+  gap: 17px;
+  min-width: 0;
+}
+.lv-big-cover {
+  width: 72px;
+  height: 94px;
+  flex: 0 0 auto;
+  border-radius: 13px;
+  background: linear-gradient(155deg, #473984, #17263c 68%);
+  border: 1px solid #5d5794;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
+}
+.lv-book-heading h1 {
+  margin: 4px 0 7px;
+  font-size: clamp(25px, 4vw, 38px);
+  letter-spacing: -0.04em;
+  line-height: 1.02;
+}
+.lv-meta {
+  color: #78849d;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.lv-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid #1d2538;
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+.lv-tab {
+  border: 0;
+  background: transparent;
+  color: #7b879f;
+  padding: 11px 13px 12px;
+  font-weight: 720;
+  font-size: 12px;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.lv-tab.active {
+  color: #e7eaff;
+  border-bottom-color: #7c67ff;
+}
+.lv-reader {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 18px;
+}
+.lv-card {
+  border: 1px solid #1e283e;
+  background: rgba(13, 19, 35, 0.78);
+  border-radius: 17px;
+}
+.lv-chapter-list {
+  padding: 9px;
+  max-height: calc(100vh - 285px);
+  overflow: auto;
+}
+.lv-chapter-row {
+  width: 100%;
+  border: 1px solid transparent;
+  color: #9aa6bc;
+  background: transparent;
+  border-radius: 11px;
+  padding: 11px;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  gap: 9px;
+}
+.lv-chapter-row:hover {
+  background: #121a2d;
+}
+.lv-chapter-row.active {
+  background: #171c35;
+  border-color: #333d65;
+  color: white;
+}
+.lv-chapter-num {
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  background: #182038;
+  color: #9aa7c5;
+}
+.lv-chapter-row strong {
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.lv-chapter-row span {
+  display: block;
+  font-size: 10px;
+  color: #65718a;
+  margin-top: 4px;
+}
+.lv-reader-panel {
+  min-width: 0;
+}
+.lv-reading-card {
+  padding: 23px;
+  min-height: 430px;
+}
+.lv-reading-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+.lv-reading-top h2 {
+  margin: 0 0 5px;
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+.lv-reading-top p {
+  margin: 0;
+  color: #76839d;
+  font-size: 11px;
+}
+.lv-status-pill {
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 6px 9px;
+  background: #10251e;
+  color: #79dfba;
+  border: 1px solid #22473a;
+  white-space: nowrap;
+}
+.lv-text {
+  color: #c5cee1;
+  line-height: 1.9;
+  font-size: 15px;
+  max-height: 54vh;
+  overflow: auto;
+  padding-right: 7px;
+  white-space: pre-wrap;
+}
+.lv-player {
+  margin-top: 14px;
+  padding: 15px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex-wrap: wrap;
+}
+.lv-player-main {
+  display: flex;
+  gap: 8px;
+}
+.lv-round {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 0;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: linear-gradient(135deg, #7d61ff, #5d78ff);
+}
+.lv-round.subtle {
+  background: #172036;
+  color: #b7c2d8;
+  border: 1px solid #2b3650;
+}
+.lv-progress {
+  flex: 1 1 190px;
+  min-width: 120px;
+}
+.lv-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #1f2940;
+  overflow: hidden;
+}
+.lv-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7b61ff, #43d9a8);
+  border-radius: inherit;
+  transition: width 0.15s linear;
+}
+.lv-player-label {
+  color: #79869f;
+  font-size: 10px;
+  margin-top: 6px;
+}
+.lv-rate {
+  border: 1px solid #2a344d;
+  background: #11182a;
+  color: #d4dcef;
+  border-radius: 9px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+.lv-audio {
+  width: 100%;
+  margin-top: 10px;
+  accent-color: #775fff;
+}
+.lv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.lv-info-card {
+  padding: 18px;
+}
+.lv-info-card h3 {
+  margin: 0 0 7px;
+  font-size: 14px;
+}
+.lv-info-card p {
+  margin: 0;
+  color: #78859e;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.lv-info-card .lv-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.lv-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 9px;
+  margin: 14px 0;
+}
+.lv-stat {
+  background: #10172a;
+  border: 1px solid #212c43;
+  padding: 12px;
+  border-radius: 12px;
+}
+.lv-stat strong {
+  display: block;
+  font-size: 18px;
+}
+.lv-stat span {
+  color: #6e7a93;
+  font-size: 10px;
+}
+.lv-export-stack {
+  display: grid;
+  gap: 12px;
+}
+.lv-export-hero {
+  padding: 22px;
+  background: linear-gradient(
+    145deg,
+    rgba(40, 30, 80, 0.65),
+    rgba(11, 25, 33, 0.78)
+  );
+  border-color: #343460;
+}
+.lv-export-hero h2 {
+  margin: 0 0 8px;
+  font-size: 23px;
+}
+.lv-export-hero p {
+  color: #8a97af;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  max-width: 760px;
+}
+.lv-export-actions {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-top: 17px;
+}
+.lv-generation {
+  margin-top: 15px;
+  border-top: 1px solid #2b3150;
+  padding-top: 13px;
+}
+.lv-generation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: #8d99b2;
+  margin-bottom: 7px;
+}
+.lv-table {
+  overflow: hidden;
+}
+.lv-table-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 100px 120px;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 13px;
+  border-bottom: 1px solid #1d263a;
+}
+.lv-table-row:last-child {
+  border-bottom: 0;
+}
+.lv-table-row strong {
+  font-size: 12px;
+}
+.lv-table-row span {
+  font-size: 10px;
+  color: #6e7b94;
+}
+.lv-table-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.lv-mini-button {
+  width: 31px;
+  height: 31px;
+  border-radius: 8px;
+  border: 1px solid #29354e;
+  background: #11192b;
+  color: #aab7cf;
+  display: grid;
+  place-items: center;
+}
+.lv-mini-button:hover {
+  background: #18223a;
+}
+.lv-import-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(3, 6, 13, 0.78);
+  backdrop-filter: blur(8px);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+.lv-import-box {
+  width: min(430px, 100%);
+  padding: 23px;
+  text-align: center;
+}
+.lv-spinner {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid #2e3855;
+  border-top-color: #8068ff;
+  animation: spin 0.9s linear infinite;
+  margin: 0 auto 13px;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.lv-import-box h3 {
+  margin: 0 0 6px;
+}
+.lv-import-box p {
+  margin: 0 0 14px;
+  color: #7c89a4;
+  font-size: 11px;
+}
+.lv-modal-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(2, 5, 12, 0.72);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+.lv-modal {
+  width: min(520px, 100%);
+  padding: 21px;
+}
+.lv-modal h2 {
+  margin: 0 0 7px;
+  font-size: 20px;
+}
+.lv-modal p {
+  color: #7e8ba5;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.lv-field {
+  margin-top: 15px;
+}
+.lv-field label {
+  display: block;
+  color: #8490a8;
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.lv-input,
+.lv-select {
+  width: 100%;
+  border: 1px solid #2b3650;
+  background: #0d1425;
+  color: #e6ebf8;
+  border-radius: 10px;
+  padding: 10px 11px;
+  outline: none;
+}
+.lv-input:focus,
+.lv-select:focus {
+  border-color: #715dff;
+  box-shadow: 0 0 0 3px rgba(113, 93, 255, 0.12);
+}
+.lv-check {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  color: #a6b0c4;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.lv-check input {
+  margin-top: 2px;
+  accent-color: #765fff;
+}
+.lv-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.lv-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 40;
+  max-width: min(390px, calc(100vw - 44px));
+  padding: 12px 14px;
+  background: #171f31;
+  color: #dce4f5;
+  border: 1px solid #34415e;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  border-radius: 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+.lv-toast.error {
+  border-color: #6e3541;
+  background: #2b171d;
+  color: #ffc1c9;
+}
+.lv-empty-library {
+  color: #5f6b82;
+  font-size: 11px;
+  padding: 8px;
+  line-height: 1.5;
+}
+.lv-mobile-brand {
+  display: none;
+}
+@media (max-width: 900px) {
+  .lv-app {
+    grid-template-columns: 1fr;
+  }
+  .lv-sidebar {
+    display: none;
+  }
+  .lv-topbar {
+    height: 64px;
+    padding: 0 15px;
+  }
+  .lv-mobile-brand {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #7c5cff, #34d7a0);
+    margin-right: 4px;
+  }
+  .lv-topbar-title {
+    margin-right: auto;
+  }
+  .lv-content {
+    padding: 18px 14px 96px;
+  }
+  .lv-reader {
+    grid-template-columns: 1fr;
+  }
+  .lv-chapter-list {
+    max-height: 220px;
+  }
+  .lv-grid {
+    grid-template-columns: 1fr;
+  }
+  .lv-book-header {
+    align-items: center;
+  }
+  .lv-book-header > .lv-secondary {
+    display: none;
+  }
+  .lv-big-cover {
+    width: 54px;
+    height: 72px;
+  }
+  .lv-meta {
+    font-size: 10px;
+  }
+  .lv-features {
+    grid-template-columns: 1fr;
+  }
+  .lv-hero {
+    padding-top: 14px;
+  }
+  .lv-hero h1 {
+    font-size: clamp(38px, 12vw, 58px);
+  }
+  .lv-table-row {
+    grid-template-columns: 36px minmax(0, 1fr) 80px;
+  }
+  .lv-table-row > span:nth-child(3) {
+    display: none;
+  }
+  .lv-reading-card {
+    padding: 17px;
+  }
+  .lv-text {
+    max-height: 46vh;
+    font-size: 14px;
+  }
+}
+@media (max-width: 520px) {
+  .lv-topbar-title span {
+    display: none;
+  }
+  .lv-topbar-title strong {
+    max-width: 42vw;
+  }
+  .lv-book-heading h1 {
+    font-size: 24px;
+  }
+  .lv-drop {
+    padding: 28px 14px;
+  }
+  .lv-player {
+    align-items: stretch;
+  }
+  .lv-progress {
+    flex-basis: 100%;
+    order: 3;
+  }
+  .lv-rate {
+    margin-left: auto;
+  }
+  .lv-stat-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .lv-export-actions .lv-primary,
+  .lv-export-actions .lv-secondary {
+    width: 100%;
+  }
+}
+
+
+==========================================================================================
+FICHIER: src/AudiobookApp.tsx
+==========================================================================================
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  BookOpen,
+  CheckCircle2,
+  ChevronRight,
+  CircleStop,
+  Download,
+  FileAudio,
+  FileText,
+  Headphones,
+  LockKeyhole,
+  Pencil,
+  Play,
+  Plus,
+  RotateCcw,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  Trash2,
+  Upload,
+  Volume2,
+  WandSparkles,
+  X,
+  Zap,
+} from 'lucide-react';
+import type {
+  AppSettings,
+  AudioRecord,
+  Book,
+  Chapter,
+  ImportProgress,
+} from './types';
+import {
+  cleanExtractedText,
+  formatBytes,
+  sanitizeFileName,
+  splitIntoChapters,
+} from './lib/text';
+import { extractPdf, renderPdfPageImage } from './lib/pdf';
+import {
+  CLOUD_THRESHOLD_BYTES,
+  deleteCloudJob,
+  generateCloudAudioStep,
+  getCloudCapabilities,
+  getCloudJob,
+  processCloudStep,
+  submitCloudOcrPage,
+  uploadPdfToCloud,
+  type CloudJobStatus,
+} from './lib/cloud';
+import {
+  deleteAudio,
+  deleteBook,
+  getBookAudio,
+  getBooks,
+  putAudio,
+  putBook,
+} from './lib/storage';
+import {
+  downloadVoice,
+  getStoredVoices,
+  getVoiceCatalog,
+  makeBookZip,
+  removeVoice,
+  synthesizeChapter,
+  type VoiceCatalogItem,
+} from './lib/tts';
+
+const DEFAULT_SETTINGS: AppSettings = {
+  rate: 1,
+  voiceId: 'fr_FR-siwis-medium',
+  systemVoiceUri: '',
+  ocrLang: 'fra+eng',
+  autoOcr: true,
+};
+
+const DEMO_TEXT = `Chapitre 1 — La porte entrouverte
+
+Il était un peu plus de sept heures lorsque Noé aperçut la lumière sous la porte de l'atelier. D'habitude, la pièce restait fermée jusqu'au samedi. Ce matin-là, pourtant, quelqu'un avait laissé la clé dans la serrure.
+
+Il poussa doucement. Sur la grande table, un carnet bleu attendait, ouvert à une page couverte d'une écriture minuscule. Au centre, une phrase était entourée trois fois : « Écoute avant de chercher à comprendre. »
+
+Noé sourit. Cela ressemblait exactement au genre d'énigme que son grand-père aimait lui laisser.
+
+Chapitre 2 — Une voix dans le casque
+
+Dans le tiroir du bureau, il trouva un vieux casque audio relié à un petit lecteur. Une seule piste était disponible. Il appuya sur lecture et reconnut immédiatement la voix calme de son grand-père.
+
+« Si tu entends ceci, c'est que tu as trouvé le carnet. Ne cours pas. Regarde autour de toi. Chaque détail compte davantage que la vitesse. »
+
+Noé se retourna. Sur le mur, les cartes, les photographies et les notes semblaient soudain former un chemin.
+
+Chapitre 3 — Le premier indice
+
+Derrière une photographie du port, une enveloppe avait été glissée dans le cadre. À l'intérieur se trouvait une petite carte avec trois mots : bibliothèque, horloge, midi.
+
+Cette fois, Noé ne chercha pas à deviner trop vite. Il rangea soigneusement le carnet dans son sac, remit le casque à sa place et sortit de l'atelier.
+
+Le mystère pouvait commencer.`;
+
+function uid(): string {
+  return crypto.randomUUID();
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem('livrevox-settings');
+    return raw
+      ? { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<AppSettings>) }
+      : DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function saveAs(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function buildBook(
+  title: string,
+  sourceName: string,
+  sourceSize: number,
+  pages: number,
+  text: string,
+  ocrUsed: boolean
+): Book {
+  const now = Date.now();
+  return {
+    id: uid(),
+    title,
+    sourceName,
+    sourceSize,
+    pages,
+    createdAt: now,
+    updatedAt: now,
+    ocrUsed,
+    chapters: splitIntoChapters(cleanExtractedText(text)),
+    progress: {},
+  };
+}
+
+export default function AudiobookApp() {
+  const [books, setBooks] = useState<Book[]>([]);
+  const [selectedId, setSelectedId] = useState('');
+  const [chapterId, setChapterId] = useState('');
+  const [tab, setTab] = useState<'listen' | 'chapters' | 'export'>('listen');
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(
+    null
+  );
+  const [dragging, setDragging] = useState(false);
+  const [toast, setToast] = useState<{
+    message: string;
+    error?: boolean;
+  } | null>(null);
+  const [audioMap, setAudioMap] = useState<Record<string, AudioRecord>>({});
+  const [voiceCatalog, setVoiceCatalog] = useState<VoiceCatalogItem[]>([]);
+  const [storedVoices, setStoredVoices] = useState<string[]>([]);
+  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [speechState, setSpeechState] = useState<'idle' | 'playing' | 'paused'>(
+    'idle'
+  );
+  const [speechProgress, setSpeechProgress] = useState(0);
+  const [generation, setGeneration] = useState<{
+    active: boolean;
+    progress: number;
+    label: string;
+    mode: 'voice' | 'chapter' | 'book';
+  } | null>(null);
+  const [renameChapter, setRenameChapter] = useState<Chapter | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
+  const [passwordPrompt, setPasswordPrompt] = useState<{ fileName: string; incorrect: boolean } | null>(null);
+  const [passwordValue, setPasswordValue] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const cancelGeneration = useRef(false);
+  const passwordResolver = useRef<((password: string | null) => void) | null>(null);
+
+  const selectedBook = useMemo(
+    () => books.find(book => book.id === selectedId) ?? null,
+    [books, selectedId]
+  );
+  const selectedChapter = useMemo(
+    () =>
+      selectedBook?.chapters.find(chapter => chapter.id === chapterId) ??
+      selectedBook?.chapters[0] ??
+      null,
+    [selectedBook, chapterId]
+  );
+  const currentAudio =
+    selectedBook && selectedChapter ? audioMap[selectedChapter.id] : undefined;
+  const audioUrl = useMemo(
+    () => (currentAudio ? URL.createObjectURL(currentAudio.blob) : ''),
+    [currentAudio]
+  );
+  const generatedCount = selectedBook
+    ? selectedBook.chapters.filter(chapter => audioMap[chapter.id] || chapter.audioUrl).length
+    : 0;
+  const isCloudBook = Boolean(selectedBook?.cloudJobId);
+  const playableAudioUrl = selectedChapter?.audioUrl || audioUrl;
+  const totalWords =
+    selectedBook?.chapters.reduce((sum, chapter) => sum + chapter.words, 0) ??
+    0;
+  const totalMinutes =
+    selectedBook?.chapters.reduce(
+      (sum, chapter) => sum + chapter.estimatedMinutes,
+      0
+    ) ?? 0;
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const list = await getBooks();
+        setBooks(list);
+        if (list.length) {
+          setSelectedId(list[0].id);
+          setChapterId(list[0].chapters[0]?.id ?? '');
+        }
+        await navigator.storage?.persist?.();
+      } catch (error) {
+        showToast(
+          error instanceof Error
+            ? error.message
+            : 'Impossible de charger la bibliothèque.',
+          true
+        );
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('livrevox-settings', JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    if (!selectedBook) {
+      setAudioMap({});
+      return;
+    }
+    if (!selectedBook.chapters.some(chapter => chapter.id === chapterId))
+      setChapterId(selectedBook.chapters[0]?.id ?? '');
+    void getBookAudio(selectedBook.id).then(records =>
+      setAudioMap(
+        Object.fromEntries(records.map(record => [record.chapterId, record]))
+      )
+    );
+  }, [selectedBook?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
+
+  useEffect(() => {
+    const refresh = () =>
+      setSystemVoices(window.speechSynthesis?.getVoices?.() ?? []);
+    refresh();
+    window.speechSynthesis?.addEventListener?.('voiceschanged', refresh);
+    return () =>
+      window.speechSynthesis?.removeEventListener?.('voiceschanged', refresh);
+  }, []);
+
+  useEffect(() => {
+    void refreshVoiceData();
+    void getCloudCapabilities().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedBook?.cloudJobId) return;
+    void getCloudJob(selectedBook.cloudJobId)
+      .then(status => syncCloudStatus(status, selectedBook.id))
+      .catch(() => undefined);
+  }, [selectedBook?.cloudJobId]);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = settings.rate;
+  }, [settings.rate, audioUrl]);
+
+  function showToast(message: string, error = false): void {
+    setToast({ message, error });
+    window.setTimeout(() => setToast(null), 4200);
+  }
+
+  function requestPdfPassword(fileName: string, incorrect: boolean): Promise<string | null> {
+    setPasswordValue('');
+    setPasswordPrompt({ fileName, incorrect });
+    return new Promise(resolve => {
+      passwordResolver.current = resolve;
+    });
+  }
+
+  function submitPdfPassword(): void {
+    const password = passwordValue;
+    if (!password) return;
+    passwordResolver.current?.(password);
+    passwordResolver.current = null;
+    setPasswordPrompt(null);
+    setPasswordValue('');
+  }
+
+  function cancelPdfPassword(): void {
+    passwordResolver.current?.(null);
+    passwordResolver.current = null;
+    setPasswordPrompt(null);
+    setPasswordValue('');
+  }
+
+  async function refreshVoiceData(): Promise<void> {
+    try {
+      const [catalog, stored] = await Promise.all([
+        getVoiceCatalog(),
+        getStoredVoices(),
+      ]);
+      setVoiceCatalog(catalog);
+      setStoredVoices(stored);
+      const selectedExists = catalog.some(
+        voice => voice.id === settings.voiceId
+      );
+      if (!selectedExists) {
+        const french = catalog.find(voice => voice.id.startsWith('fr_'));
+        if (french)
+          setSettings(current => ({ ...current, voiceId: french.id }));
+      }
+    } catch {
+      setVoiceCatalog([
+        {
+          id: settings.voiceId,
+          label: settings.voiceId.replace(/_/g, ' '),
+          language: 'Français',
+        },
+      ]);
+    }
+  }
+
+  function selectBook(book: Book): void {
+    stopSpeech();
+    setSelectedId(book.id);
+    setChapterId(book.chapters[0]?.id ?? '');
+    setTab('listen');
+  }
+
+  function cloudBookFromStatus(status: CloudJobStatus, existing?: Book): Book {
+    const now = Date.now();
+    return {
+      id: existing?.id ?? `cloud-${status.id}`,
+      title: status.title,
+      sourceName: status.name,
+      sourceSize: status.size,
+      pages: status.pages,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      ocrUsed: existing?.ocrUsed ?? false,
+      chapters: status.chapters.map(chapter => ({ ...chapter })),
+      progress: existing?.progress ?? {},
+      cloudJobId: status.id,
+      cloudStatus: status.status,
+      cloudProcessingProgress: status.processingProgress,
+      cloudAudioReady: status.audioReady,
+      cloudTtsConfigured: status.ttsConfigured,
+      cloudTtsProvider: status.ttsProvider,
+    };
+  }
+
+  async function syncCloudStatus(status: CloudJobStatus, bookId?: string): Promise<Book> {
+    const existing = books.find(book => book.id === bookId || book.cloudJobId === status.id);
+    const updated = cloudBookFromStatus(status, existing);
+    await putBook(updated);
+    setBooks(current => {
+      const found = current.some(book => book.id === updated.id);
+      return found ? current.map(book => book.id === updated.id ? updated : book) : [updated, ...current];
+    });
+    if (selectedId === updated.id && updated.chapters.length && !updated.chapters.some(chapter => chapter.id === chapterId)) setChapterId(updated.chapters[0].id);
+    return updated;
+  }
+
+  async function continueCloudPipeline(jobId: string, file: File | null, bookId: string): Promise<void> {
+    let status = await getCloudJob(jobId);
+    let safety = 0;
+    while (safety < 500 && !['complete', 'failed', 'password_protected'].includes(status.status)) {
+      safety += 1;
+      if (status.status === 'waiting_ocr' && status.needsOcrPage) {
+        if (!file) break;
+        setImportProgress({ stage: `OCR cloud de la page ${status.needsOcrPage}`, progress: 62 + Math.round(status.processingProgress * 0.28) });
+        const pageImage = await renderPdfPageImage(file, status.needsOcrPage, incorrect => requestPdfPassword(file.name, incorrect));
+        status = await submitCloudOcrPage(jobId, status.needsOcrPage, pageImage);
+      } else if (['queued', 'processing'].includes(status.status)) {
+        status = await processCloudStep(jobId);
+      } else if (status.ttsConfigured && status.audioReady < status.chapters.length) {
+        status = await generateCloudAudioStep(jobId);
+      } else {
+        break;
+      }
+      await syncCloudStatus(status, bookId);
+      if (status.pages) setImportProgress({ stage: status.ttsConfigured ? `Traitement cloud · ${status.processingProgress}% · audio ${status.audioReady}/${status.chapters.length}` : `Traitement cloud · ${status.processingProgress}%`, progress: 62 + Math.round(status.processingProgress * 0.37) });
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    setImportProgress(null);
+    if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
+    else if (status.status === 'password_protected') showToast('PDF protégé détecté : LivreVox repasse automatiquement en traitement local sécurisé.', true);
+    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte cloud prêt. La voix cloud s’activera dès qu’une clé TTS sera configurée ; Piper reste disponible en secours.');
+  }
+
+  async function importLocalFile(file: File): Promise<void> {
+    setImportProgress({ stage: 'Traitement local optimisé', progress: 1 });
+    const result = await extractPdf(
+      file,
+      { autoOcr: settings.autoOcr, ocrLang: settings.ocrLang, requestPassword: incorrect => requestPdfPassword(file.name, incorrect) },
+      setImportProgress
+    );
+    const cleaned = cleanExtractedText(result.text);
+    if (cleaned.length < 120) throw new Error('Le PDF ne contient pas assez de texte exploitable.');
+    const title = file.name.replace(/\.pdf$/i, '').trim() || 'Livre sans titre';
+    const book = buildBook(title, file.name, file.size, result.pages, cleaned, result.ocrUsed);
+    if (!book.chapters.length) throw new Error('Aucun chapitre exploitable n’a été détecté.');
+    await putBook(book);
+    setBooks(current => [book, ...current]);
+    setSelectedId(book.id);
+    setChapterId(book.chapters[0]?.id ?? '');
+    setImportProgress({ stage: 'Livre prêt', progress: 100 });
+    setTimeout(() => setImportProgress(null), 350);
+    showToast(`${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''} prêt${book.chapters.length > 1 ? 's' : ''}.`);
+  }
+
+  async function importCloudFile(file: File): Promise<void> {
+    setImportProgress({ stage: 'Préparation de l’envoi cloud', progress: 1 });
+    const jobId = await uploadPdfToCloud(file, (stage, progress) => setImportProgress({ stage, progress }));
+    let status = await getCloudJob(jobId);
+    let initialSteps = 0;
+    while (!status.chapters.length && initialSteps < 20 && !['failed', 'password_protected'].includes(status.status)) {
+      initialSteps += 1;
+      if (status.status === 'waiting_ocr' && status.needsOcrPage) {
+        const pageImage = await renderPdfPageImage(file, status.needsOcrPage, incorrect => requestPdfPassword(file.name, incorrect));
+        status = await submitCloudOcrPage(jobId, status.needsOcrPage, pageImage);
+      } else {
+        status = await processCloudStep(jobId);
+      }
+      setImportProgress({ stage: status.status === 'waiting_ocr' ? 'Préparation OCR cloud' : `Analyse cloud · ${status.processingProgress}%`, progress: 62 + Math.round(status.processingProgress * 0.25) });
+    }
+    if (status.status === 'password_protected') {
+      await deleteCloudJob(jobId).catch(() => undefined);
+      await importLocalFile(file);
+      return;
+    }
+    if (status.status === 'failed') throw new Error(status.error || 'Le traitement cloud a échoué.');
+    const book = await syncCloudStatus(status);
+    setSelectedId(book.id);
+    setChapterId(book.chapters[0]?.id ?? '');
+    setImportProgress(null);
+    showToast('Le premier contenu est prêt. Le reste du livre continue maintenant dans le cloud.');
+    void continueCloudPipeline(jobId, file, book.id).catch(error => { setImportProgress(null); showToast(error instanceof Error ? error.message : 'Le traitement cloud a été interrompu.', true); });
+  }
+
+  async function importFile(file: File): Promise<void> {
+    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+      showToast('Choisis un fichier PDF.', true);
+      return;
+    }
+    try {
+      if (file.size >= CLOUD_THRESHOLD_BYTES) await importCloudFile(file);
+      else await importLocalFile(file);
+    } catch (error) {
+      setImportProgress(null);
+      showToast(error instanceof Error ? error.message : 'Import du PDF impossible.', true);
+    }
+  }
+
+  async function addDemo(): Promise<void> {
+    const book = buildBook(
+      'Le carnet bleu — Démo',
+      'livre-demo.pdf',
+      0,
+      3,
+      DEMO_TEXT,
+      false
+    );
+    await putBook(book);
+    setBooks(current => [book, ...current]);
+    setSelectedId(book.id);
+    setChapterId(book.chapters[0]?.id ?? '');
+    showToast('Livre démo ajouté. Tu peux tester tout le lecteur.');
+  }
+
+  function stopSpeech(): void {
+    window.speechSynthesis?.cancel();
+    setSpeechState('idle');
+    setSpeechProgress(0);
+  }
+
+  function toggleInstantSpeech(): void {
+    if (!selectedChapter) return;
+    if (!('speechSynthesis' in window)) {
+      showToast(
+        'La lecture vocale système n’est pas disponible dans ce navigateur.',
+        true
+      );
+      return;
+    }
+    if (speechState === 'playing') {
+      window.speechSynthesis.pause();
+      setSpeechState('paused');
+      return;
+    }
+    if (speechState === 'paused') {
+      window.speechSynthesis.resume();
+      setSpeechState('playing');
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(selectedChapter.text);
+    utterance.rate = settings.rate;
+    const voice =
+      systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ??
+      systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
+    if (voice) utterance.voice = voice;
+    utterance.onboundary = (event: SpeechSynthesisEvent) => {
+      setSpeechProgress(
+        Math.min(
+          100,
+          Math.round(
+            (event.charIndex / Math.max(1, selectedChapter.text.length)) * 100
+          )
+        )
+      );
+    };
+    utterance.onend = () => {
+      setSpeechState('idle');
+      setSpeechProgress(100);
+    };
+    utterance.onerror = () => {
+      setSpeechState('idle');
+      showToast('La voix système a interrompu la lecture.', true);
+    };
+    window.speechSynthesis.speak(utterance);
+    setSpeechState('playing');
+  }
+
+  async function ensureVoiceReady(): Promise<boolean> {
+    if (storedVoices.includes(settings.voiceId)) return true;
+    setGeneration({
+      active: true,
+      progress: 0,
+      label: 'Téléchargement du modèle vocal local',
+      mode: 'voice',
+    });
+    try {
+      await downloadVoice(settings.voiceId, progress =>
+        setGeneration({
+          active: true,
+          progress,
+          label: `Téléchargement de la voix · ${progress} %`,
+          mode: 'voice',
+        })
+      );
+      const stored = await getStoredVoices();
+      setStoredVoices(stored);
+      return true;
+    } catch (error) {
+      showToast(
+        error instanceof Error
+          ? error.message
+          : 'Impossible de télécharger la voix locale.',
+        true
+      );
+      return false;
+    } finally {
+      setGeneration(null);
+    }
+  }
+
+  async function generateOne(
+    book: Book,
+    chapter: Chapter,
+    mode: 'chapter' | 'book'
+  ): Promise<AudioRecord | null> {
+    const ready = await ensureVoiceReady();
+    if (!ready) return null;
+    cancelGeneration.current = false;
+    setGeneration({
+      active: true,
+      progress: 0,
+      label: `Préparation de ${chapter.title}`,
+      mode,
+    });
+    try {
+      const result = await synthesizeChapter(
+        chapter.text,
+        settings.voiceId,
+        (progress, label) =>
+          setGeneration({ active: true, progress, label, mode }),
+        () => cancelGeneration.current
+      );
+      const record: AudioRecord = {
+        id: `${book.id}:${chapter.id}`,
+        bookId: book.id,
+        chapterId: chapter.id,
+        voiceId: settings.voiceId,
+        blob: result.blob,
+        duration: result.duration,
+        createdAt: Date.now(),
+      };
+      await putAudio(record);
+      setAudioMap(current => ({ ...current, [chapter.id]: record }));
+      return record;
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : 'Génération audio impossible.',
+        true
+      );
+      return null;
+    } finally {
+      setGeneration(null);
+    }
+  }
+
+  async function generateCurrent(): Promise<void> {
+    if (!selectedBook || !selectedChapter) return;
+    const record = await generateOne(selectedBook, selectedChapter, 'chapter');
+    if (record) showToast('Chapitre audio généré et enregistré localement.');
+  }
+
+  async function generateAll(): Promise<void> {
+    if (!selectedBook) return;
+    cancelGeneration.current = false;
+    const ready = await ensureVoiceReady();
+    if (!ready) return;
+    let completed = 0;
+    for (let index = 0; index < selectedBook.chapters.length; index += 1) {
+      if (cancelGeneration.current) break;
+      const chapter = selectedBook.chapters[index];
+      if (audioMap[chapter.id]?.voiceId === settings.voiceId) {
+        completed += 1;
+        continue;
+      }
+      setGeneration({
+        active: true,
+        progress: Math.round((index / selectedBook.chapters.length) * 100),
+        label: `Chapitre ${index + 1}/${selectedBook.chapters.length} · ${chapter.title}`,
+        mode: 'book',
+      });
+      const record = await generateOne(selectedBook, chapter, 'book');
+      if (!record) break;
+      completed += 1;
+    }
+    setGeneration(null);
+    if (!cancelGeneration.current && completed === selectedBook.chapters.length)
+      showToast('Le livre audio complet est prêt à être exporté.');
+  }
+
+  async function exportBook(): Promise<void> {
+    if (!selectedBook) return;
+    const records = await getBookAudio(selectedBook.id);
+    const map = Object.fromEntries(
+      records.map(record => [record.chapterId, record])
+    );
+    const missing = selectedBook.chapters.filter(chapter => !map[chapter.id]);
+    if (missing.length) {
+      showToast(
+        `Il reste ${missing.length} chapitre${missing.length > 1 ? 's' : ''} à générer.`,
+        true
+      );
+      return;
+    }
+    setGeneration({
+      active: true,
+      progress: 30,
+      label: 'Création de l’archive du livre audio',
+      mode: 'book',
+    });
+    try {
+      const zip = await makeBookZip(
+        selectedBook.title,
+        selectedBook.chapters.map((chapter, index) => ({
+          index,
+          title: chapter.title,
+          blob: map[chapter.id].blob,
+        }))
+      );
+      saveAs(zip, `${sanitizeFileName(selectedBook.title)} - Livre audio.zip`);
+      showToast('Livre audio exporté en ZIP.');
+    } finally {
+      setGeneration(null);
+    }
+  }
+
+  async function removeGeneratedChapter(chapter: Chapter): Promise<void> {
+    if (!selectedBook) return;
+    await deleteAudio(selectedBook.id, chapter.id);
+    setAudioMap(current => {
+      const next = { ...current };
+      delete next[chapter.id];
+      return next;
+    });
+    showToast('Audio local supprimé.');
+  }
+
+  async function renameSelectedChapter(): Promise<void> {
+    if (!selectedBook || !renameChapter || !renameValue.trim()) return;
+    const updated: Book = {
+      ...selectedBook,
+      updatedAt: Date.now(),
+      chapters: selectedBook.chapters.map(chapter =>
+        chapter.id === renameChapter.id
+          ? { ...chapter, title: renameValue.trim() }
+          : chapter
+      ),
+    };
+    await putBook(updated);
+    setBooks(current =>
+      current.map(book => (book.id === updated.id ? updated : book))
+    );
+    setRenameChapter(null);
+    showToast('Titre du chapitre enregistré.');
+  }
+
+  async function confirmDeleteBook(): Promise<void> {
+    if (!deleteTarget) return;
+    if (deleteTarget.cloudJobId) await deleteCloudJob(deleteTarget.cloudJobId).catch(() => undefined);
+    await deleteBook(deleteTarget.id);
+    const next = books.filter(book => book.id !== deleteTarget.id);
+    setBooks(next);
+    if (selectedId === deleteTarget.id) {
+      setSelectedId(next[0]?.id ?? '');
+      setChapterId(next[0]?.chapters[0]?.id ?? '');
+    }
+    setDeleteTarget(null);
+    showToast(deleteTarget.cloudJobId ? 'Livre supprimé de cet appareil et du cloud.' : 'Livre supprimé de cet appareil.');
+  }
+
+  async function forgetVoice(): Promise<void> {
+    if (!storedVoices.includes(settings.voiceId)) return;
+    try {
+      await removeVoice(settings.voiceId);
+      await refreshVoiceData();
+      showToast('Modèle vocal supprimé du stockage local.');
+    } catch {
+      showToast('Impossible de supprimer ce modèle vocal.', true);
+    }
+  }
+
+  const frenchSystemVoices = systemVoices.filter(voice =>
+    voice.lang.toLowerCase().startsWith('fr')
+  );
+
+  return (
+    <div className="lv-app">
+      <aside className="lv-sidebar">
+        <div className="lv-brand">
+          <div className="lv-logo">
+            <Headphones size={20} />
+          </div>
+          <div>
+            <strong>LivreVox</strong>
+            <small>PDF → audio local</small>
+          </div>
+        </div>
+        <button className="lv-primary" onClick={() => fileRef.current?.click()}>
+          <Plus size={16} /> Importer un PDF
+        </button>
+        <div className="lv-section-label">Ma bibliothèque</div>
+        <div className="lv-books">
+          {books.length === 0 && (
+            <div className="lv-empty-library">
+              Tes livres apparaîtront ici et resteront enregistrés sur cet
+              appareil.
+            </div>
+          )}
+          {books.map(book => (
+            <button
+              key={book.id}
+              className={`lv-book-item ${selectedId === book.id ? 'active' : ''}`}
+              onClick={() => selectBook(book)}
+            >
+              <div className="lv-book-cover">
+                <BookOpen size={16} />
+              </div>
+              <div className="lv-book-copy">
+                <strong>{book.title}</strong>
+                <span>
+                  {book.chapters.length} chap. · ~
+                  {book.chapters.reduce(
+                    (sum, item) => sum + item.estimatedMinutes,
+                    0
+                  )}{' '}
+                  min
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="lv-sidebar-bottom">
+          <div className="lv-private-card">
+            <LockKeyhole size={15} />
+            <span>
+              Mode hybride : petits PDF sur l’appareil, gros livres traités progressivement dans le cloud.
+            </span>
+          </div>
+        </div>
+      </aside>
+
+      <main className="lv-main">
+        <header className="lv-topbar">
+          <div className="lv-mobile-brand">
+            <Headphones size={17} />
+          </div>
+          <div className="lv-topbar-title">
+            <strong>{selectedBook?.title ?? 'LivreVox'}</strong>
+            <span>
+              {selectedBook
+                ? 'Bibliothèque locale'
+                : 'Convertisseur PDF → livre audio'}
+            </span>
+          </div>
+          <div className="lv-top-actions">
+            <button
+              className="lv-icon-button"
+              title="Importer un PDF"
+              onClick={() => fileRef.current?.click()}
+            >
+              <Upload size={17} />
+            </button>
+            <button
+              className="lv-icon-button"
+              title="Réglages"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings size={17} />
+            </button>
+          </div>
+        </header>
+
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/pdf,.pdf"
+          hidden
+          onChange={event => {
+            const file = event.target.files?.[0];
+            if (file) void importFile(file);
+            event.target.value = '';
+          }}
+        />
+
+        <div className="lv-content">
+          {!selectedBook ? (
+            <section className="lv-empty">
+              <div className="lv-hero">
+                <div className="lv-badge">
+                  <ShieldCheck size={13} /> Hybride · reprise progressive · streaming cloud
+                </div>
+                <h1>
+                  Transforme ton PDF en <em>livre audio.</em>
+                </h1>
+                <p>
+                  Importe un livre : les petits PDF restent rapides en local et les gros ouvrages passent automatiquement dans le cloud, par blocs, pour garder l’interface fluide. Les premiers chapitres arrivent avant la fin du traitement.
+                </p>
+                <div
+                  className={`lv-drop ${dragging ? 'dragging' : ''}`}
+                  onDragEnter={event => {
+                    event.preventDefault();
+                    setDragging(true);
+                  }}
+                  onDragOver={event => event.preventDefault()}
+                  onDragLeave={() => setDragging(false)}
+                  onDrop={event => {
+                    event.preventDefault();
+                    setDragging(false);
+                    const file = event.dataTransfer.files?.[0];
+                    if (file) void importFile(file);
+                  }}
+                >
+                  <div className="lv-drop-icon">
+                    <FileText size={25} />
+                  </div>
+                  <strong>Dépose ton PDF ici</strong>
+                  <span>PDF texte, mixte ou scanné · gros fichiers envoyés par blocs reprenables</span>
+                  <div className="lv-drop-actions">
+                    <button
+                      className="lv-primary"
+                      style={{ width: 'auto' }}
+                      onClick={() => fileRef.current?.click()}
+                    >
+                      <Upload size={15} /> Choisir un PDF
+                    </button>
+                    <button
+                      className="lv-secondary"
+                      onClick={() => void addDemo()}
+                    >
+                      <Sparkles size={15} /> Charger le livre démo
+                    </button>
+                  </div>
+                </div>
+                <div className="lv-features">
+                  <div className="lv-feature">
+                    <strong>
+                      <WandSparkles size={14} /> Chapitrage automatique
+                    </strong>
+                    Détecte titres, parties et sections, avec découpage
+                    intelligent si le PDF n’en contient pas.
+                  </div>
+                  <div className="lv-feature">
+                    <strong>
+                      <Zap size={14} /> OCR local
+                    </strong>
+                    Les pages scannées sont détectées automatiquement ; le rendu reste léger et la transcription OCR est effectuée dans le cloud.
+                  </div>
+                  <div className="lv-feature">
+                    <strong>
+                      <FileAudio size={14} /> Vrais fichiers WAV
+                    </strong>
+                    Génère chaque chapitre avec Piper, puis exporte le livre
+                    complet dans une archive ZIP.
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : (
+            <>
+              <section className="lv-book-header">
+                <div className="lv-book-heading">
+                  <div className="lv-big-cover">
+                    <BookOpen size={28} />
+                  </div>
+                  <div>
+                    <h1>{selectedBook.title}</h1>
+                    <div className="lv-meta">
+                      <span>{selectedBook.pages || '—'} pages{selectedBook.cloudJobId ? ' · Cloud' : ' · Local'}</span>
+                      <span>{totalWords.toLocaleString('fr-FR')} mots</span>
+                      <span>~{totalMinutes} min</span>
+                      <span>{formatBytes(selectedBook.sourceSize)}</span>
+                      {selectedBook.ocrUsed && <span>OCR utilisé</span>}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  className="lv-secondary"
+                  onClick={() => setDeleteTarget(selectedBook)}
+                >
+                  <Trash2 size={14} /> Supprimer
+                </button>
+              </section>
+
+              <nav className="lv-tabs" aria-label="Sections du livre">
+                <button
+                  className={`lv-tab ${tab === 'listen' ? 'active' : ''}`}
+                  onClick={() => setTab('listen')}
+                >
+                  Écouter
+                </button>
+                <button
+                  className={`lv-tab ${tab === 'chapters' ? 'active' : ''}`}
+                  onClick={() => setTab('chapters')}
+                >
+                  Chapitres
+                </button>
+                <button
+                  className={`lv-tab ${tab === 'export' ? 'active' : ''}`}
+                  onClick={() => setTab('export')}
+                >
+                  Générer & exporter
+                </button>
+              </nav>
+
+              {tab === 'listen' && selectedChapter && (
+                <section className="lv-reader">
+                  <div className="lv-card lv-chapter-list">
+                    {selectedBook.chapters.map((chapter, index) => (
+                      <button
+                        key={chapter.id}
+                        className={`lv-chapter-row ${selectedChapter.id === chapter.id ? 'active' : ''}`}
+                        onClick={() => {
+                          stopSpeech();
+                          setChapterId(chapter.id);
+                        }}
+                      >
+                        <span className="lv-chapter-num">{index + 1}</span>
+                        <span>
+                          <strong>{chapter.title}</strong>
+                          <span>
+                            {chapter.words} mots · ~{chapter.estimatedMinutes}{' '}
+                            min {audioMap[chapter.id] ? '· audio prêt' : ''}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="lv-reader-panel">
+                    <article className="lv-card lv-reading-card">
+                      <div className="lv-reading-top">
+                        <div>
+                          <h2>{selectedChapter.title}</h2>
+                          <p>
+                            {selectedChapter.words} mots · environ{' '}
+                            {selectedChapter.estimatedMinutes} min
+                          </p>
+                        </div>
+                        <span className="lv-status-pill">
+                          {currentAudio
+                            ? 'WAV local prêt'
+                            : 'Lecture instantanée'}
+                        </span>
+                      </div>
+                      <div className="lv-text">{selectedChapter.text}</div>
+                    </article>
+
+                    <div className="lv-card lv-player">
+                      <div className="lv-player-main">
+                        <button
+                          className="lv-round"
+                          aria-label={
+                            speechState === 'playing'
+                              ? 'Mettre en pause'
+                              : 'Lire avec la voix système'
+                          }
+                          onClick={toggleInstantSpeech}
+                        >
+                          {speechState === 'playing' ? (
+                            <Square size={17} />
+                          ) : (
+                            <Play size={18} fill="currentColor" />
+                          )}
+                        </button>
+                        <button
+                          className="lv-round subtle"
+                          aria-label="Arrêter"
+                          onClick={stopSpeech}
+                        >
+                          <CircleStop size={17} />
+                        </button>
+                      </div>
+                      <div className="lv-progress">
+                        <div className="lv-progress-track">
+                          <div
+                            className="lv-progress-fill"
+                            style={{ width: `${speechProgress}%` }}
+                          />
+                        </div>
+                        <div className="lv-player-label">
+                          Voix système ·{' '}
+                          {speechState === 'idle'
+                            ? 'prête'
+                            : speechState === 'paused'
+                              ? 'en pause'
+                              : 'lecture en cours'}
+                        </div>
+                      </div>
+                      <select
+                        aria-label="Vitesse de lecture"
+                        className="lv-rate"
+                        value={settings.rate}
+                        onChange={event =>
+                          setSettings(current => ({
+                            ...current,
+                            rate: Number(event.target.value),
+                          }))
+                        }
+                      >
+                        {[0.8, 1, 1.15, 1.3, 1.5, 1.75, 2].map(rate => (
+                          <option key={rate} value={rate}>
+                            {rate}×
+                          </option>
+                        ))}
+                      </select>
+                      {(currentAudio || selectedChapter.audioUrl) && (
+                        <audio
+                          ref={audioRef}
+                          className="lv-audio"
+                          controls
+                          src={playableAudioUrl}
+                          onPlay={() => {
+                            if (audioRef.current)
+                              audioRef.current.playbackRate = settings.rate;
+                          }}
+                        />
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {tab === 'chapters' && (
+                <section className="lv-grid">
+                  {selectedBook.chapters.map((chapter, index) => (
+                    <div className="lv-card lv-info-card" key={chapter.id}>
+                      <h3>
+                        {index + 1}. {chapter.title}
+                      </h3>
+                      <p>
+                        {chapter.words.toLocaleString('fr-FR')} mots · environ{' '}
+                        {chapter.estimatedMinutes} min ·{' '}
+                        {chapter.audioUrl ? 'audio cloud prêt' : audioMap[chapter.id] ? 'audio local généré' : 'pas encore généré'}
+                      </p>
+                      <div className="lv-card-actions">
+                        <button
+                          className="lv-secondary"
+                          onClick={() => {
+                            setChapterId(chapter.id);
+                            setTab('listen');
+                          }}
+                        >
+                          <Play size={13} /> Ouvrir
+                        </button>
+                        <button
+                          className="lv-ghost"
+                          onClick={() => {
+                            setRenameChapter(chapter);
+                            setRenameValue(chapter.title);
+                          }}
+                        >
+                          <Pencil size={13} /> Renommer
+                        </button>
+                        {audioMap[chapter.id] && !chapter.audioUrl && (
+                          <button
+                            className="lv-ghost lv-danger"
+                            onClick={() => void removeGeneratedChapter(chapter)}
+                          >
+                            <Trash2 size={13} /> Audio
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </section>
+              )}
+
+              {tab === 'export' && (
+                <section className="lv-export-stack">
+                  <div className="lv-card lv-export-hero">
+                    <div className="lv-badge">
+                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : 'Moteur neuronal local Piper'}
+                    </div>
+                    <h2>{isCloudBook ? 'Livre audio progressif dans le cloud' : 'Génère le vrai livre audio'}</h2>
+                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Au premier lancement, le modèle vocal choisi est téléchargé puis conservé dans le stockage privé du navigateur. Le mode local reste disponible pour les petits documents et comme secours.'}</p>
+                    <div className="lv-stat-grid">
+                      <div className="lv-stat">
+                        <strong>
+                          {generatedCount}/{selectedBook.chapters.length}
+                        </strong>
+                        <span>chapitres prêts</span>
+                      </div>
+                      <div className="lv-stat">
+                        <strong>
+                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'Secours') : (storedVoices.includes(settings.voiceId) ? 'Oui' : 'Non')}
+                        </strong>
+                        <span>{isCloudBook ? 'moteur cloud' : 'voix en cache'}</span>
+                      </div>
+                      <div className="lv-stat">
+                        <strong>{isCloudBook ? `${selectedBook.cloudAudioReady ?? 0}` : 'WAV'}</strong>
+                        <span>{isCloudBook ? 'audios cloud prêts' : 'format audio'}</span>
+                      </div>
+                    </div>
+                    <div className="lv-export-actions">
+                      {isCloudBook ? (
+                        <>
+                          <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
+                            <RotateCcw size={15} /> Reprendre le traitement cloud
+                          </button>
+                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre en local</button>}
+                        </>
+                      ) : (
+                        <>
+                          <button className="lv-primary" style={{ width: 'auto' }} disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre</button>
+                          <button className="lv-secondary" disabled={Boolean(generation?.active)} onClick={() => void generateAll()}><RotateCcw size={15} /> Générer tout le livre</button>
+                          <button className="lv-secondary" disabled={generatedCount !== selectedBook.chapters.length || Boolean(generation?.active)} onClick={() => void exportBook()}><Download size={15} /> Exporter le ZIP</button>
+                        </>
+                      )}
+                    </div>
+                    {generation && (
+                      <div className="lv-generation">
+                        <div className="lv-generation-row">
+                          <span>{generation.label}</span>
+                          <strong>{generation.progress}%</strong>
+                        </div>
+                        <div className="lv-progress-track">
+                          <div
+                            className="lv-progress-fill"
+                            style={{ width: `${generation.progress}%` }}
+                          />
+                        </div>
+                        {generation.mode === 'book' && (
+                          <button
+                            className="lv-ghost lv-danger"
+                            style={{ marginTop: 10 }}
+                            onClick={() => {
+                              cancelGeneration.current = true;
+                            }}
+                          >
+                            <X size={13} /> Annuler
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="lv-card lv-table">
+                    {selectedBook.chapters.map((chapter, index) => (
+                      <div className="lv-table-row" key={chapter.id}>
+                        <span>{String(index + 1).padStart(2, '0')}</span>
+                        <div>
+                          <strong>{chapter.title}</strong>
+                          <span>{chapter.words} mots</span>
+                        </div>
+                        <span>
+                          {chapter.audioUrl || audioMap[chapter.id] ? 'Prêt' : 'À générer'}
+                        </span>
+                        <div className="lv-table-actions">
+                          {chapter.audioUrl ? (
+                            <a className="lv-mini-button" title="Ouvrir l’audio cloud" href={chapter.audioUrl} target="_blank" rel="noreferrer"><Play size={14} /></a>
+                          ) : audioMap[chapter.id] ? (
+                            <>
+                              <button
+                                className="lv-mini-button"
+                                title="Télécharger le WAV"
+                                onClick={() =>
+                                  saveAs(
+                                    audioMap[chapter.id].blob,
+                                    `${String(index + 1).padStart(2, '0')} - ${sanitizeFileName(chapter.title)}.wav`
+                                  )
+                                }
+                              >
+                                <Download size={14} />
+                              </button>
+                              <button
+                                className="lv-mini-button"
+                                title="Supprimer l’audio"
+                                onClick={() =>
+                                  void removeGeneratedChapter(chapter)
+                                }
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              className="lv-mini-button"
+                              title="Générer ce chapitre"
+                              onClick={() => {
+                                setChapterId(chapter.id);
+                                void generateOne(
+                                  selectedBook,
+                                  chapter,
+                                  'chapter'
+                                );
+                              }}
+                            >
+                              <ChevronRight size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </>
+          )}
+        </div>
+      </main>
+
+      {importProgress && (
+        <div className="lv-import-overlay">
+          <div className="lv-card lv-import-box">
+            <div className="lv-spinner" />
+            <h3>{importProgress.stage}</h3>
+            <p>{importProgress.stage.toLowerCase().includes('cloud') ? 'Le navigateur reste léger pendant que le serveur traite le livre.' : 'Le document est traité progressivement sans charger tout le fichier en mémoire.'}</p>
+            <div className="lv-progress-track">
+              <div
+                className="lv-progress-fill"
+                style={{ width: `${importProgress.progress}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div
+          className="lv-modal-wrap"
+          onMouseDown={event => {
+            if (event.currentTarget === event.target) setSettingsOpen(false);
+          }}
+        >
+          <div className="lv-card lv-modal">
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <h2>Réglages</h2>
+              <button
+                className="lv-icon-button"
+                onClick={() => setSettingsOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <p>Les réglages restent enregistrés dans ton navigateur.</p>
+            <div className="lv-field">
+              <label htmlFor="neural-voice">Voix neuronale locale</label>
+              <select
+                id="neural-voice"
+                className="lv-select"
+                value={settings.voiceId}
+                onChange={event =>
+                  setSettings(current => ({
+                    ...current,
+                    voiceId: event.target.value,
+                  }))
+                }
+              >
+                {(voiceCatalog.length
+                  ? voiceCatalog
+                  : [
+                      {
+                        id: settings.voiceId,
+                        label: settings.voiceId,
+                        language: 'Français',
+                      },
+                    ]
+                ).map(voice => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.language} · {voice.label}
+                  </option>
+                ))}
+              </select>
+              <p>
+                {storedVoices.includes(settings.voiceId)
+                  ? 'Cette voix est déjà stockée localement.'
+                  : 'Elle sera téléchargée automatiquement lors de la première génération.'}
+              </p>
+            </div>
+            <div className="lv-field">
+              <label htmlFor="system-voice">
+                Voix système pour l’écoute instantanée
+              </label>
+              <select
+                id="system-voice"
+                className="lv-select"
+                value={settings.systemVoiceUri}
+                onChange={event =>
+                  setSettings(current => ({
+                    ...current,
+                    systemVoiceUri: event.target.value,
+                  }))
+                }
+              >
+                <option value="">Automatique</option>
+                {frenchSystemVoices.map(voice => (
+                  <option key={voice.voiceURI} value={voice.voiceURI}>
+                    {voice.name} · {voice.lang}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="lv-field">
+              <label htmlFor="ocr-lang">Langue OCR</label>
+              <select
+                id="ocr-lang"
+                className="lv-select"
+                value={settings.ocrLang}
+                onChange={event =>
+                  setSettings(current => ({
+                    ...current,
+                    ocrLang: event.target.value as AppSettings['ocrLang'],
+                  }))
+                }
+              >
+                <option value="fra+eng">Français + anglais</option>
+                <option value="fra">Français</option>
+                <option value="eng">Anglais</option>
+              </select>
+            </div>
+            <div className="lv-field">
+              <label className="lv-check">
+                <input
+                  type="checkbox"
+                  checked={settings.autoOcr}
+                  onChange={event =>
+                    setSettings(current => ({
+                      ...current,
+                      autoOcr: event.target.checked,
+                    }))
+                  }
+                />
+                <span>
+                  Activer automatiquement l’OCR local lorsque PDF.js ne trouve
+                  presque aucun texte sur une page.
+                </span>
+              </label>
+            </div>
+            <div className="lv-modal-actions">
+              {storedVoices.includes(settings.voiceId) && (
+                <button
+                  className="lv-ghost lv-danger"
+                  onClick={() => void forgetVoice()}
+                >
+                  <Trash2 size={13} /> Oublier cette voix
+                </button>
+              )}
+              <button
+                className="lv-primary"
+                style={{ width: 'auto' }}
+                onClick={() => setSettingsOpen(false)}
+              >
+                Terminé
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {passwordPrompt && (
+        <div className="lv-modal-wrap">
+          <div className="lv-card lv-modal">
+            <h2>{passwordPrompt.incorrect ? 'Mot de passe incorrect' : 'PDF protégé'}</h2>
+            <p>
+              {passwordPrompt.incorrect
+                ? 'Le mot de passe saisi ne déverrouille pas ce PDF. Réessaie.'
+                : `« ${passwordPrompt.fileName} » est protégé. Entre son mot de passe pour poursuivre l’import local.`}
+            </p>
+            <div className="lv-field">
+              <label htmlFor="pdf-password">Mot de passe du PDF</label>
+              <input
+                id="pdf-password"
+                className="lv-input"
+                type="password"
+                autoFocus
+                autoComplete="off"
+                value={passwordValue}
+                onChange={event => setPasswordValue(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') submitPdfPassword();
+                }}
+              />
+            </div>
+            <div className="lv-modal-actions">
+              <button className="lv-ghost" onClick={cancelPdfPassword}>Annuler</button>
+              <button
+                className="lv-primary"
+                style={{ width: 'auto' }}
+                disabled={!passwordValue}
+                onClick={submitPdfPassword}
+              >
+                Ouvrir le PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {renameChapter && (
+        <div className="lv-modal-wrap">
+          <div className="lv-card lv-modal">
+            <h2>Renommer le chapitre</h2>
+            <div className="lv-field">
+              <label htmlFor="chapter-title">Titre</label>
+              <input
+                id="chapter-title"
+                className="lv-input"
+                autoFocus
+                value={renameValue}
+                onChange={event => setRenameValue(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') void renameSelectedChapter();
+                }}
+              />
+            </div>
+            <div className="lv-modal-actions">
+              <button
+                className="lv-ghost"
+                onClick={() => setRenameChapter(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="lv-primary"
+                style={{ width: 'auto' }}
+                disabled={!renameValue.trim()}
+                onClick={() => void renameSelectedChapter()}
+              >
+                Enregistrer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="lv-modal-wrap">
+          <div className="lv-card lv-modal">
+            <h2>Supprimer ce livre ?</h2>
+            <p>
+              « {deleteTarget.title} » et ses fichiers audio seront supprimés {deleteTarget.cloudJobId ? 'de cet appareil et du stockage cloud LivreVox' : 'du stockage local de cet appareil'}.
+            </p>
+            <div className="lv-modal-actions">
+              <button
+                className="lv-ghost"
+                onClick={() => setDeleteTarget(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="lv-secondary lv-danger"
+                onClick={() => void confirmDeleteBook()}
+              >
+                <Trash2 size={13} /> Supprimer définitivement
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className={`lv-toast ${toast.error ? 'error' : ''}`}>
+          {toast.error ? <X size={15} /> : <CheckCircle2 size={15} />}
+          <span>{toast.message}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+==========================================================================================
+FICHIER: tests/tests.json
+==========================================================================================
+
+[
+  {
+    "name": "Afficher le mode hybride cloud et conserver le flux local de démonstration",
+    "sanity": true,
+    "viewport": "desktop",
+    "covers": ["GET /api/cloud/capabilities", "mode hybride local-cloud", "bibliothèque persistante", "lecteur de chapitre"],
+    "description": "Vérifie que LivreVox démarre avec le pipeline hybride disponible tout en conservant un parcours local instantané pour les petits documents.",
+    "steps": ["Vérifier que l’accueil annonce le mode hybride et le streaming cloud", "Cliquer sur \"Charger le livre démo\"", "Actualiser la page puis rouvrir le premier chapitre"],
+    "expected": "Le livre démo reste présent après actualisation et l’interface indique clairement que les gros PDF passent par le cloud tandis que les petits restent locaux."
+  },
+  {
+    "name": "Conserver les réglages de lecture sur mobile",
+    "viewport": "mobile",
+    "covers": ["lecture vocale instantanée", "réglages persistants", "interface mobile"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que la lecture et ses réglages restent utilisables sur mobile après l’évolution cloud.",
+    "steps": ["Dans l'onglet \"Écouter\", choisir la vitesse 1.5×", "Ouvrir puis fermer les réglages", "Actualiser la page"],
+    "expected": "La vitesse 1.5× reste sélectionnée et l’interface est toujours utilisable sur mobile."
+  },
+  {
+    "name": "Renommer un chapitre sans perdre la modification",
+    "viewport": "desktop",
+    "covers": ["édition des chapitres", "persistance des métadonnées"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que les corrections de chapitrage restent persistantes.",
+    "steps": ["Ouvrir l'onglet \"Chapitres\"", "Renommer le premier chapitre en \"Départ du mystère\"", "Actualiser la page"],
+    "expected": "Le titre \"Départ du mystère\" est toujours visible après actualisation."
+  },
+  {
+    "name": "Protéger la suppression d’un livre par confirmation",
+    "viewport": "desktop",
+    "covers": ["suppression locale", "DELETE /api/cloud/jobs/:id pour livres cloud", "confirmation destructive"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que la suppression reste explicite et durable.",
+    "steps": ["Cliquer sur \"Supprimer\" puis annuler", "Vérifier que le livre est toujours présent", "Relancer la suppression, confirmer puis actualiser"],
+    "expected": "Le livre disparaît uniquement après confirmation et ne réapparaît pas après actualisation."
+  },
+  {
+    "name": "Présenter correctement la génération et le stockage audio",
+    "viewport": "mobile",
+    "covers": ["POST /api/cloud/jobs/:id/tts-next", "audio stocké une seule fois", "streaming des chapitres", "fallback Piper"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que le mode local reste disponible lorsque le moteur TTS cloud n’est pas configuré et que l’interface de génération reste cohérente.",
+    "steps": ["Ouvrir l'onglet \"Générer & exporter\"", "Vérifier que le moteur Piper local est disponible sur le livre démo", "Revenir à l'accueil et vérifier la mention du stockage/streaming cloud pour les gros livres"],
+    "expected": "LivreVox propose toujours une génération locale de secours et présente le pipeline cloud comme le mode destiné aux gros ouvrages."
+  }
+]

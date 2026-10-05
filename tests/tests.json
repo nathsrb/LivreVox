@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Afficher le mode hybride cloud et conserver le flux local de démonstration",
+    "sanity": true,
+    "viewport": "desktop",
+    "covers": ["GET /api/cloud/capabilities", "mode hybride local-cloud", "bibliothèque persistante", "lecteur de chapitre"],
+    "description": "Vérifie que LivreVox démarre avec le pipeline hybride disponible tout en conservant un parcours local instantané pour les petits documents.",
+    "steps": ["Vérifier que l’accueil annonce le mode hybride et le streaming cloud", "Cliquer sur \"Charger le livre démo\"", "Actualiser la page puis rouvrir le premier chapitre"],
+    "expected": "Le livre démo reste présent après actualisation et l’interface indique clairement que les gros PDF passent par le cloud tandis que les petits restent locaux."
+  },
+  {
+    "name": "Conserver les réglages de lecture sur mobile",
+    "viewport": "mobile",
+    "covers": ["lecture vocale instantanée", "réglages persistants", "interface mobile"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que la lecture et ses réglages restent utilisables sur mobile après l’évolution cloud.",
+    "steps": ["Dans l'onglet \"Écouter\", choisir la vitesse 1.5×", "Ouvrir puis fermer les réglages", "Actualiser la page"],
+    "expected": "La vitesse 1.5× reste sélectionnée et l’interface est toujours utilisable sur mobile."
+  },
+  {
+    "name": "Renommer un chapitre sans perdre la modification",
+    "viewport": "desktop",
+    "covers": ["édition des chapitres", "persistance des métadonnées"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que les corrections de chapitrage restent persistantes.",
+    "steps": ["Ouvrir l'onglet \"Chapitres\"", "Renommer le premier chapitre en \"Départ du mystère\"", "Actualiser la page"],
+    "expected": "Le titre \"Départ du mystère\" est toujours visible après actualisation."
+  },
+  {
+    "name": "Protéger la suppression d’un livre par confirmation",
+    "viewport": "desktop",
+    "covers": ["suppression locale", "DELETE /api/cloud/jobs/:id pour livres cloud", "confirmation destructive"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que la suppression reste explicite et durable.",
+    "steps": ["Cliquer sur \"Supprimer\" puis annuler", "Vérifier que le livre est toujours présent", "Relancer la suppression, confirmer puis actualiser"],
+    "expected": "Le livre disparaît uniquement après confirmation et ne réapparaît pas après actualisation."
+  },
+  {
+    "name": "Présenter correctement la génération et le stockage audio",
+    "viewport": "mobile",
+    "covers": ["POST /api/cloud/jobs/:id/tts-next", "audio stocké une seule fois", "streaming des chapitres", "fallback Piper"],
+    "setup": ["Créer un livre démo depuis l'écran d'accueil"],
+    "description": "Vérifie que le mode local reste disponible lorsque le moteur TTS cloud n’est pas configuré et que l’interface de génération reste cohérente.",
+    "steps": ["Ouvrir l'onglet \"Générer & exporter\"", "Vérifier que le moteur Piper local est disponible sur le livre démo", "Revenir à l'accueil et vérifier la mention du stockage/streaming cloud pour les gros livres"],
+    "expected": "LivreVox propose toujours une génération locale de secours et présente le pipeline cloud comme le mode destiné aux gros ouvrages."
+  }
+]

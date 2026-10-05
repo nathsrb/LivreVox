@@ -1,0 +1,9 @@
+[
+  {
+    "name": "livrevox-cloud-worker",
+    "cron": "*/15 * * * *",
+    "handler": "cloudWorker",
+    "timezone": "Europe/Paris",
+    "payload": {}
+  }
+]
