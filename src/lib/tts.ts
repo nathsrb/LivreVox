@@ -17,6 +17,15 @@ type WavMeta = {
   data: Uint8Array;
 };
 
+type RemoteTtsResponse = {
+  audio?: string;
+  mimeType?: string;
+  model?: string;
+  error?: string;
+};
+
+let remoteCapabilityCache: { value: boolean; expiresAt: number } | null = null;
+
 function parseWav(buffer: ArrayBuffer): WavMeta {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
@@ -109,6 +118,51 @@ async function mergeWavBlobs(
   };
 }
 
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const clean = base64.includes(',') ? base64.slice(base64.indexOf(',') + 1) : base64;
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1)
+    bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mimeType });
+}
+
+async function isRemoteTtsAvailable(force = false): Promise<boolean> {
+  if (!force && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
+    return remoteCapabilityCache.value;
+  try {
+    const response = await fetch('/api/health', { headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error('API indisponible');
+    const payload = (await response.json()) as { ttsConfigured?: boolean };
+    const value = Boolean(payload.ttsConfigured);
+    remoteCapabilityCache = { value, expiresAt: Date.now() + 15_000 };
+    return value;
+  } catch {
+    remoteCapabilityCache = { value: false, expiresAt: Date.now() + 5_000 };
+    return false;
+  }
+}
+
+async function synthesizeRemoteChunk(text: string): Promise<Blob> {
+  const response = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  let payload: RemoteTtsResponse = {};
+  try {
+    payload = (await response.json()) as RemoteTtsResponse;
+  } catch {
+    // Le message HTTP ci-dessous reste suffisamment explicite.
+  }
+  if (!response.ok || !payload.audio) {
+    throw new Error(
+      payload.error || `Gemini TTS a échoué (${response.status}).`
+    );
+  }
+  return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
+}
+
 export async function getVoiceCatalog(): Promise<VoiceCatalogItem[]> {
   const piper = await import('@mintplex-labs/piper-tts-web');
   const raw = await piper.voices();
@@ -128,13 +182,20 @@ export async function getVoiceCatalog(): Promise<VoiceCatalogItem[]> {
 
 export async function getStoredVoices(): Promise<string[]> {
   const piper = await import('@mintplex-labs/piper-tts-web');
-  return piper.stored();
+  const stored = await piper.stored();
+  if (!(await isRemoteTtsAvailable())) return stored;
+  const raw = await piper.voices();
+  return Array.from(new Set([...stored, ...Object.keys(raw)]));
 }
 
 export async function downloadVoice(
   voiceId: string,
   onProgress: (value: number) => void
 ): Promise<void> {
+  if (await isRemoteTtsAvailable()) {
+    onProgress(100);
+    return;
+  }
   const piper = await import('@mintplex-labs/piper-tts-web');
   await piper.download(voiceId, progress => {
     if (progress.loaded !== undefined && progress.total)
@@ -149,6 +210,7 @@ export async function downloadVoice(
 }
 
 export async function removeVoice(voiceId: string): Promise<void> {
+  if (await isRemoteTtsAvailable()) return;
   const piper = await import('@mintplex-labs/piper-tts-web');
   await piper.remove(voiceId);
 }
@@ -159,29 +221,43 @@ export async function synthesizeChapter(
   onProgress: (value: number, label: string) => void,
   shouldCancel: () => boolean
 ): Promise<{ blob: Blob; duration: number }> {
-  const piper = await import('@mintplex-labs/piper-tts-web');
   const chunks = chunkForSpeech(text);
   const blobs: Blob[] = [];
-  for (let index = 0; index < chunks.length; index += 1) {
-    if (shouldCancel()) throw new Error('Génération annulée.');
-    onProgress(
-      Math.round((index / chunks.length) * 100),
-      `Synthèse ${index + 1}/${chunks.length}`
-    );
-    const wav = await piper.predict(
-      { text: chunks[index], voiceId },
-      progress => {
-        if (progress.loaded !== undefined && progress.total) {
-          const downloadPart = progress.loaded / progress.total;
-          onProgress(
-            Math.round(((index + downloadPart) / chunks.length) * 100),
-            `Préparation de la voix · ${Math.round(downloadPart * 100)} %`
-          );
+  const useRemote = await isRemoteTtsAvailable(true);
+
+  if (useRemote) {
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (shouldCancel()) throw new Error('Génération annulée.');
+      onProgress(
+        Math.round((index / chunks.length) * 100),
+        `Gemini · segment ${index + 1}/${chunks.length}`
+      );
+      blobs.push(await synthesizeRemoteChunk(chunks[index]));
+    }
+  } else {
+    const piper = await import('@mintplex-labs/piper-tts-web');
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (shouldCancel()) throw new Error('Génération annulée.');
+      onProgress(
+        Math.round((index / chunks.length) * 100),
+        `Synthèse locale ${index + 1}/${chunks.length}`
+      );
+      const wav = await piper.predict(
+        { text: chunks[index], voiceId },
+        progress => {
+          if (progress.loaded !== undefined && progress.total) {
+            const downloadPart = progress.loaded / progress.total;
+            onProgress(
+              Math.round(((index + downloadPart) / chunks.length) * 100),
+              `Préparation de la voix locale · ${Math.round(downloadPart * 100)} %`
+            );
+          }
         }
-      }
-    );
-    blobs.push(wav);
+      );
+      blobs.push(wav);
+    }
   }
+
   onProgress(96, 'Assemblage du chapitre');
   const merged = await mergeWavBlobs(blobs);
   onProgress(100, 'Chapitre prêt');
