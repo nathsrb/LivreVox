@@ -16,6 +16,9 @@ type PdfResult = {
   ocrUsed: boolean;
 };
 
+type PdfPasswordUpdater = (password: string | Error) => void;
+type PdfProgress = { loaded: number; total: number };
+
 class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
   private readonly file: File;
   private aborted = false;
@@ -67,7 +70,7 @@ export async function renderPdfPageImage(
     disableAutoFetch: true,
     disableStream: true,
   });
-  loadingTask.onPassword = (updatePassword, reason) => {
+  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = requestPassword ? await requestPassword(incorrect) : null;
@@ -78,7 +81,8 @@ export async function renderPdfPageImage(
   let canvas: HTMLCanvasElement | null = null;
   try {
     const pdf = await loadingTask.promise;
-    if (pageNumber < 1 || pageNumber > pdf.numPages) throw new Error('Page PDF invalide.');
+    if (pageNumber < 1 || pageNumber > pdf.numPages)
+      throw new Error('Page PDF invalide.');
     const page = await pdf.getPage(pageNumber);
     try {
       const viewport = page.getViewport({ scale: 1.2 });
@@ -87,10 +91,13 @@ export async function renderPdfPageImage(
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext('2d', { alpha: false });
       if (!context) throw new Error('Impossible de préparer la page.');
-      await page.render({ canvasContext: context, viewport }).promise;
+      await page.render({ canvas, canvasContext: context, viewport }).promise;
       return await new Promise<Blob>((resolve, reject) =>
         canvas!.toBlob(
-          blob => blob ? resolve(blob) : reject(new Error('Impossible de convertir la page en image.')),
+          blob =>
+            blob
+              ? resolve(blob)
+              : reject(new Error('Impossible de convertir la page en image.')),
           'image/jpeg',
           0.8
         )
@@ -123,7 +130,7 @@ export async function extractPdf(
     disableStream: true,
   });
 
-  loadingTask.onProgress = progress => {
+  loadingTask.onProgress = (progress: PdfProgress) => {
     if (!progress.total) return;
     const ratio = Math.max(0, Math.min(1, progress.loaded / progress.total));
     onProgress({
@@ -132,7 +139,7 @@ export async function extractPdf(
     });
   };
 
-  loadingTask.onPassword = (updatePassword, reason) => {
+  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = options.requestPassword
