@@ -7,13 +7,20 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+      },
+    },
+  },
   optimizeDeps: {
     include: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
   },
   build: {
-    outDir: process.env.APPDEPLOY_VITE_OUT_DIR || 'dist',
-    sourcemap:
-      process.env.APPDEPLOY_VITE_SOURCEMAP === 'hidden' ? 'hidden' : false,
+    outDir: 'dist',
+    sourcemap: false,
     rollupOptions: {
       maxParallelFileOps: 128,
     },
