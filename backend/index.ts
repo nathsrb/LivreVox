@@ -40,7 +40,8 @@ const JOBS = 'cloud_jobs';
 const CHAPTERS = 'cloud_chapters';
 const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 const PROCESS_PAGES = 4;
-const MAX_CHAPTER_CHARS = 5200;
+const MAX_CHAPTER_CHARS = 2800;
+const TTS_PARALLELISM = 4;
 
 function cleanText(input: string): string {
   return input.replace(/\r/g, '').replace(/([a-zà-öø-ÿ])[-–]\n([a-zà-öø-ÿ])/gi, '$1$2').replace(/[\t ]+/g, ' ').replace(/\n{4,}/g, '\n\n').trim();
@@ -294,27 +295,49 @@ async function geminiTts(text: string): Promise<{ base64: string; mimeType: stri
   return { base64: audio.data, mimeType: audio.mime_type || 'audio/wav', extension: 'wav' };
 }
 
-async function generateNextAudio(jobId: string, sourceJob: JobRecord): Promise<JobRecord> {
+async function generateAudioBatch(jobId: string, sourceJob: JobRecord, limit = TTS_PARALLELISM): Promise<JobRecord> {
   const provider = configuredProvider();
   if (!provider || !sourceJob.chapterIds.length) return sourceJob;
+
   const chapterRecords = await db.get<ChapterRecord>(CHAPTERS, sourceJob.chapterIds);
-  const pendingIndex = chapterRecords.findIndex(chapter => chapter && !chapter.audioPath);
-  if (pendingIndex < 0) {
-    return updateJob(jobId, sourceJob, { status: sourceJob.nextPage > sourceJob.pages && sourceJob.pages > 0 ? 'complete' : sourceJob.status, audioReady: sourceJob.chapterIds.length });
+  const pending = chapterRecords
+    .map((chapter, index) => ({ chapter, index, chapterId: sourceJob.chapterIds[index] }))
+    .filter(item => item.chapter && !item.chapter.audioPath)
+    .slice(0, Math.max(1, limit));
+
+  if (!pending.length) {
+    const allTextReady = sourceJob.pages > 0 && sourceJob.nextPage > sourceJob.pages;
+    return updateJob(jobId, sourceJob, {
+      status: allTextReady ? 'complete' : sourceJob.status,
+      audioReady: sourceJob.chapterIds.length,
+    });
   }
-  const chapter = chapterRecords[pendingIndex];
-  if (!chapter) return sourceJob;
-  const chapterId = sourceJob.chapterIds[pendingIndex];
-  const audio = provider === 'deepinfra' ? await deepInfraTts(chapter.text) : await geminiTts(chapter.text);
-  const path = `cloud/${jobId}/audio/${String(pendingIndex).padStart(5, '0')}.${audio.extension}`;
-  const [written] = await storage.write([{ path, content: audio.base64, contentType: audio.mimeType }]);
-  if (!written) throw new Error('Impossible de stocker l’audio généré.');
-  const [updated] = await db.update(CHAPTERS, [{ id: chapterId, record: { ...chapter, audioPath: path, audioMimeType: audio.mimeType } }]);
-  if (!updated) throw new Error('Impossible d’enregistrer l’état audio du chapitre.');
-  const audioReady = sourceJob.audioReady + 1;
+
+  const results = await Promise.allSettled(
+    pending.map(async ({ chapter, index, chapterId }) => {
+      if (!chapter) return;
+      const audio = provider === 'deepinfra' ? await deepInfraTts(chapter.text) : await geminiTts(chapter.text);
+      const path = `cloud/${jobId}/audio/${String(index).padStart(5, '0')}.${audio.extension}`;
+      const [written] = await storage.write([{ path, content: audio.base64, contentType: audio.mimeType }]);
+      if (!written) throw new Error(`Impossible de stocker l’audio du chapitre ${index + 1}.`);
+      const [updated] = await db.update(CHAPTERS, [{ id: chapterId, record: { ...chapter, audioPath: path, audioMimeType: audio.mimeType } }]);
+      if (!updated) throw new Error(`Impossible d’enregistrer l’audio du chapitre ${index + 1}.`);
+    })
+  );
+
+  const refreshed = await db.get<ChapterRecord>(CHAPTERS, sourceJob.chapterIds);
+  const audioReady = refreshed.filter(chapter => Boolean(chapter?.audioPath)).length;
   const allTextReady = sourceJob.pages > 0 && sourceJob.nextPage > sourceJob.pages;
   const allAudioReady = audioReady >= sourceJob.chapterIds.length && allTextReady;
-  return updateJob(jobId, sourceJob, { audioReady, status: allAudioReady ? 'complete' : allTextReady ? 'generating_audio' : sourceJob.status });
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+
+  const updatedJob = await updateJob(jobId, sourceJob, {
+    audioReady,
+    status: allAudioReady ? 'complete' : allTextReady ? 'generating_audio' : sourceJob.status,
+  });
+
+  if (failed && audioReady === sourceJob.audioReady) throw failed.reason;
+  return updatedJob;
 }
 
 async function publicJob(jobId: string, job: JobRecord) {
@@ -443,7 +466,7 @@ export const handler = router({
     if (!job) return error('Tâche introuvable.', 404);
     if (!configuredProvider()) return json(await publicJob(params.id, job));
     try {
-      const updated = await generateNextAudio(params.id, job);
+      const updated = await generateAudioBatch(params.id, job, TTS_PARALLELISM);
       return json(await publicJob(params.id, updated));
     } catch (err) {
       console.error('cloud_tts_failed', err);
@@ -473,7 +496,7 @@ export const cloudWorker = async () => {
     let job = jobData as JobRecord;
     try {
       if (['queued', 'processing'].includes(job.status)) job = await processJobBatch(id, job, 2);
-      if (configuredProvider() && job.chapterIds.length > job.audioReady) await generateNextAudio(id, job);
+      if (configuredProvider() && job.chapterIds.length > job.audioReady) await generateAudioBatch(id, job, TTS_PARALLELISM);
     } catch (err) {
       console.error('cloud_worker_job_failed', id, err);
     }
