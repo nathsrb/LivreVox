@@ -118,7 +118,7 @@ function uid(): string {
   return crypto.randomUUID();
 }
 
-const SPEEDS = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const SPEEDS = [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 
 function loadSettings(): AppSettings {
   try {
