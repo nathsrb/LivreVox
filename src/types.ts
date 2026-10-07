@@ -42,6 +42,8 @@ export type AudioRecord = {
   createdAt: number;
 };
 
+export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly';
+
 export type AppSettings = {
   rate: number;
   voiceId: string;
@@ -49,6 +51,10 @@ export type AppSettings = {
   systemVoiceUri: string;
   ocrLang: 'fra' | 'eng' | 'fra+eng';
   autoOcr: boolean;
+  ttsProvider?: TtsProvider;
+  apiKey?: string;
+  apiSecret?: string;
+  awsRegion?: string;
   geminiApiKey?: string;
 };
 
