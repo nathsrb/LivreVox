@@ -81,6 +81,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
   voiceId: 'fr_FR-siwis-medium',
   cloudVoice: 'Kore',
+  ttsProvider: 'gemini',
+  apiKey: '',
+  apiSecret: '',
+  awsRegion: 'eu-west-3',
   systemVoiceUri: '',
   ocrLang: 'fra+eng',
   autoOcr: true,
@@ -126,7 +130,8 @@ function loadSettings(): AppSettings {
     const parsedA = rawA ? (JSON.parse(rawA) as Partial<AppSettings>) : {};
     const parsedL = rawL ? (JSON.parse(rawL) as Partial<AppSettings>) : {};
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsedL, ...parsedA };
-    if (directKey && directKey.trim()) {
+    if (directKey && directKey.trim() && !merged.apiKey) {
+      merged.apiKey = directKey.trim();
       merged.geminiApiKey = directKey.trim();
     }
     const savedRate = localStorage.getItem('auralis_playback_rate');
@@ -340,9 +345,12 @@ export default function AudiobookApp() {
   useEffect(() => {
     localStorage.setItem('auralis-settings', JSON.stringify(settings));
     localStorage.setItem('livrevox-settings', JSON.stringify(settings));
-    if (settings.geminiApiKey?.trim()) {
-      localStorage.setItem('auralis_gemini_api_key', settings.geminiApiKey.trim());
-      localStorage.setItem('gemini_api_key', settings.geminiApiKey.trim());
+    if (settings.apiKey?.trim()) {
+      localStorage.setItem('auralis_api_key', settings.apiKey.trim());
+      if ((settings.ttsProvider || 'gemini') === 'gemini') {
+        localStorage.setItem('auralis_gemini_api_key', settings.apiKey.trim());
+        localStorage.setItem('gemini_api_key', settings.apiKey.trim());
+      }
     }
   }, [settings]);
 
@@ -482,7 +490,7 @@ export default function AudiobookApp() {
       message.includes('RESOURCE_EXHAUSTED') ||
       message.includes('exceeded your current quota')
     ) {
-      cleanMessage = 'Débit temporaire Gemini atteint (429). Conseil : utilisez « Voix directe » pour écouter immédiatement sans attente.';
+      cleanMessage = 'Débit temporaire IA atteint (429). Conseil : utilisez « Voix directe » pour écouter immédiatement sans attente.';
     }
     setToast({ message: cleanMessage, error });
     window.setTimeout(() => setToast(null), 5500);
@@ -773,10 +781,10 @@ export default function AudiobookApp() {
 
   async function generateCurrentAndPlay(): Promise<void> {
     if (!selectedBook || !selectedChapter) return;
-    showToast(`Génération de la voix Gemini Flash pour « ${selectedChapter.title} »...`);
+    showToast(`Génération de la voix IA pour « ${selectedChapter.title} »...`);
     const record = await generateOne(selectedBook, selectedChapter, 'chapter');
     if (record) {
-      showToast(`Audio Gemini Flash prêt ! Démarrage de l'écoute.`);
+      showToast(`Audio IA prêt ! Démarrage de l'écoute.`);
       setTimeout(() => {
         if (audioRef.current) {
           audioRef.current.currentTime = 0;
@@ -816,14 +824,20 @@ export default function AudiobookApp() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(settings.geminiApiKey ? { 'x-gemini-api-key': settings.geminiApiKey } : {}),
+          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+          ...(settings.apiSecret ? { 'x-api-secret': settings.apiSecret } : {}),
+          'x-tts-provider': settings.ttsProvider || 'gemini',
+          ...(settings.awsRegion ? { 'x-aws-region': settings.awsRegion } : {}),
         },
         body: JSON.stringify({
           chapterText: chapter.text,
           chapterTitle: chapter.title,
           bookTitle: selectedBook.title,
           previousChaptersContext: prevContext,
-          customApiKey: settings.geminiApiKey,
+          customApiKey: settings.apiKey,
+          provider: settings.ttsProvider || 'gemini',
+          apiSecret: settings.apiSecret,
+          region: settings.awsRegion,
         }),
       });
 
@@ -852,16 +866,19 @@ export default function AudiobookApp() {
     }
   }
 
-  async function playSummaryWithGemini(summaryText: string): Promise<void> {
+  async function playSummaryWithIA(summaryText: string): Promise<void> {
     if (!summaryText) return;
     stopAllPlayback();
-    showToast('Synthèse vocale Gemini Flash pour le résumé...');
+    showToast('Synthèse vocale IA pour le résumé...');
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(settings.geminiApiKey ? { 'x-gemini-api-key': settings.geminiApiKey } : {}),
+          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+          ...(settings.apiSecret ? { 'x-api-secret': settings.apiSecret } : {}),
+          'x-tts-provider': settings.ttsProvider || 'gemini',
+          ...(settings.awsRegion ? { 'x-aws-region': settings.awsRegion } : {}),
         },
         body: JSON.stringify({
           text: summaryText.replace(/###|---|\*\*|⚡|📖|🧠|👥|💡|🔗|🎯/g, ' ').slice(0, 15000),
@@ -889,7 +906,7 @@ export default function AudiobookApp() {
   }
 
   async function testApiKey(): Promise<void> {
-    const key = (settings.geminiApiKey || '').trim();
+    const key = (settings.apiKey || '').trim();
     if (!key) {
       showToast('Veuillez saisir votre clé API d’abord.', true);
       return;
@@ -900,18 +917,22 @@ export default function AudiobookApp() {
       const res = await fetch('/api/validate-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: key }),
+        body: JSON.stringify({
+          provider: settings.ttsProvider || 'gemini',
+          apiKey: key,
+          apiSecret: settings.apiSecret,
+          region: settings.awsRegion,
+        }),
       });
       const data = await res.json();
       if (res.ok && data.ok) {
         setKeyTestStatus('valid');
-        localStorage.setItem('auralis_gemini_api_key', key);
-        localStorage.setItem('gemini_api_key', key);
-        showToast('✓ Clé API Gemini validée avec succès ! Connectée à Gemini Flash.');
+        localStorage.setItem('auralis_api_key', key);
+        showToast(`✓ Identifiants validés pour ${settings.ttsProvider || 'gemini'}.`);
       } else {
         setKeyTestStatus('invalid');
         setKeyTestError(data.error || 'Clé non valide.');
-        showToast(data.error || 'Clé API Gemini invalide.', true);
+        showToast(data.error || 'Identifiants API invalides.', true);
       }
     } catch (err: any) {
       setKeyTestStatus('invalid');
@@ -1053,7 +1074,7 @@ export default function AudiobookApp() {
   }
 
   async function ensureVoiceReady(): Promise<boolean> {
-    if (settings.geminiApiKey?.trim() || localStorage.getItem('auralis_gemini_api_key')) return true;
+    if (settings.apiKey?.trim() || localStorage.getItem('auralis_api_key') || localStorage.getItem('auralis_gemini_api_key')) return true;
     if (storedVoices.includes(settings.voiceId)) return true;
     setGeneration({
       active: true,
@@ -1107,7 +1128,7 @@ export default function AudiobookApp() {
         (progress, label) =>
           setGeneration({ active: true, progress, label, mode }),
         () => cancelGeneration.current,
-        settings.geminiApiKey,
+        settings.apiKey,
         settings.cloudVoice
       );
       const record: AudioRecord = {
@@ -1333,7 +1354,7 @@ export default function AudiobookApp() {
             </span>
           </div>
           <div className="lv-top-actions">
-            {settings.geminiApiKey?.trim() ? (
+            {settings.apiKey?.trim() ? (
               <span
                 style={{
                   fontSize: '11px',
@@ -1347,10 +1368,10 @@ export default function AudiobookApp() {
                   gap: '5px',
                   fontWeight: 500,
                 }}
-                title="Votre clé API Gemini personnelle est chargée et active"
+                title="Vos identifiants API sont chargés et actifs"
               >
                 <CheckCircle2 size={12} />
-                <span>Clé Gemini connectée</span>
+                <span>API {settings.ttsProvider || 'gemini'} connectée</span>
               </span>
             ) : null}
             <button
@@ -1932,18 +1953,18 @@ export default function AudiobookApp() {
                         <Brain size={20} /> Résumé & Mémorisation IA — {selectedChapter.title}
                       </h2>
                       <p>
-                        Synthèse intelligente propulsée par Gemini Flash : points clés, concepts, anti-spoiler et format optimisé pour l'écoute.
+                        Synthèse intelligente propulsée par IA : points clés, concepts, anti-spoiler et format optimisé pour l'écoute.
                       </p>
                     </div>
                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                       {selectedChapter.summary && (
                         <button
                           className="lv-secondary"
-                          onClick={() => void playSummaryWithGemini(selectedChapter.summary!)}
+                          onClick={() => void playSummaryWithIA(selectedChapter.summary!)}
                           disabled={summaryLoading}
-                          title="Écouter la synthèse vocale Gemini Flash de ce résumé"
+                          title="Écouter la synthèse vocale IA de ce résumé"
                         >
-                          <Volume2 size={14} /> Écouter le résumé (Gemini Flash)
+                          <Volume2 size={14} /> Écouter le résumé (IA)
                         </button>
                       )}
                       <button
@@ -2001,7 +2022,7 @@ export default function AudiobookApp() {
                           onClick={() => void generateChapterSummary(selectedChapter)}
                           disabled={summaryLoading}
                         >
-                          <Sparkles size={15} /> {summaryLoading ? 'Analyse Gemini Flash...' : 'Générer avec Gemini Flash'}
+                          <Sparkles size={15} /> {summaryLoading ? 'Analyse IA...' : 'Générer avec IA'}
                         </button>
                       </div>
                     )}
@@ -2207,7 +2228,7 @@ export default function AudiobookApp() {
             <p>Personnalise les voix de lecture selon tes préférences.</p>
 
             <div className="lv-field">
-              <label htmlFor="cloud-voice">Voix Cloud Gemini (Narration IA réaliste)</label>
+              <label htmlFor="cloud-voice">Voix Cloud (selon le fournisseur)</label>
               <select
                 id="cloud-voice"
                 className="lv-select"
@@ -2345,64 +2366,88 @@ export default function AudiobookApp() {
               </label>
             </div>
             <div className="lv-field">
+              <label htmlFor="tts-provider">Fournisseur IA</label>
+              <select
+                id="tts-provider"
+                className="lv-select"
+                value={settings.ttsProvider || 'gemini'}
+                onChange={event => {
+                  const provider = event.target.value as AppSettings['ttsProvider'];
+                  setSettings(current => ({ ...current, ttsProvider: provider }));
+                  setKeyTestStatus('idle');
+                  setKeyTestError(null);
+                }}
+              >
+                <option value="deepinfra">DeepInfra · Kokoro (économique)</option>
+                <option value="gemini">Google IA</option>
+                <option value="aws-polly">Amazon Polly</option>
+              </select>
+            </div>
+
+            <div className="lv-field">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <label htmlFor="gemini-key">
-                  Clé API Google Gemini (Prioritaire · Illimité)
+                <label htmlFor="provider-key">
+                  {(settings.ttsProvider || 'gemini') === 'aws-polly' ? 'AWS Access Key ID' : 'Clé API'}
                 </label>
-                {settings.geminiApiKey?.trim() ? (
+                {settings.apiKey?.trim() ? (
                   <span style={{ fontSize: '11px', color: '#4ade80', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
-                    <CheckCircle2 size={12} /> Active & Enregistrée
+                    <CheckCircle2 size={12} /> Enregistrée
                   </span>
                 ) : null}
               </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  id="gemini-key"
-                  type="password"
-                  className="lv-input"
-                  style={{ flex: 1 }}
-                  placeholder="AIzaSy... (votre clé API Gemini personnelle)"
-                  value={settings.geminiApiKey || ''}
-                  onChange={event => {
-                    const val = event.target.value.trim();
-                    setSettings(current => ({
-                      ...current,
-                      geminiApiKey: val,
-                    }));
-                    if (val) {
-                      localStorage.setItem('auralis_gemini_api_key', val);
-                      localStorage.setItem('gemini_api_key', val);
-                    } else {
-                      localStorage.removeItem('auralis_gemini_api_key');
-                      localStorage.removeItem('gemini_api_key');
-                    }
-                    setKeyTestStatus('idle');
-                    setKeyTestError(null);
-                  }}
-                />
-                <button
-                  type="button"
-                  className="lv-secondary"
-                  style={{ width: 'auto', whiteSpace: 'nowrap' }}
-                  onClick={() => void testApiKey()}
-                  disabled={!settings.geminiApiKey?.trim() || keyTestStatus === 'testing'}
-                >
-                  {keyTestStatus === 'testing' ? 'Test...' : 'Tester'}
-                </button>
-              </div>
+              <input
+                id="provider-key"
+                type="password"
+                className="lv-input"
+                placeholder={(settings.ttsProvider || 'gemini') === 'deepinfra' ? 'Clé DeepInfra' : (settings.ttsProvider || 'gemini') === 'aws-polly' ? 'AKIA...' : 'AIzaSy...'}
+                value={settings.apiKey || ''}
+                onChange={event => {
+                  setSettings(current => ({ ...current, apiKey: event.target.value.trim() }));
+                  setKeyTestStatus('idle');
+                  setKeyTestError(null);
+                }}
+              />
+              {(settings.ttsProvider || 'gemini') === 'aws-polly' && (
+                <>
+                  <input
+                    type="password"
+                    className="lv-input"
+                    style={{ marginTop: 8 }}
+                    placeholder="AWS Secret Access Key"
+                    value={settings.apiSecret || ''}
+                    onChange={event => setSettings(current => ({ ...current, apiSecret: event.target.value.trim() }))}
+                  />
+                  <input
+                    className="lv-input"
+                    style={{ marginTop: 8 }}
+                    placeholder="Région AWS (ex. eu-west-3)"
+                    value={settings.awsRegion || 'eu-west-3'}
+                    onChange={event => setSettings(current => ({ ...current, awsRegion: event.target.value.trim() }))}
+                  />
+                </>
+              )}
+              <button
+                type="button"
+                className="lv-secondary"
+                style={{ width: 'auto', whiteSpace: 'nowrap', marginTop: 8 }}
+                onClick={() => void testApiKey()}
+                disabled={!settings.apiKey?.trim() || keyTestStatus === 'testing' || ((settings.ttsProvider || 'gemini') === 'aws-polly' && !settings.apiSecret?.trim())}
+              >
+                {keyTestStatus === 'testing' ? 'Test...' : 'Tester la connexion'}
+              </button>
 
               {keyTestStatus === 'valid' && (
                 <p style={{ fontSize: '0.8rem', color: '#4ade80', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <CheckCircle2 size={13} /> Clé valide : connectée à Gemini Flash pour toute la narration et les résumés !
+                  <CheckCircle2 size={13} /> Connexion API validée.
                 </p>
               )}
               {keyTestStatus === 'invalid' && (
                 <p style={{ fontSize: '0.8rem', color: '#f87171', marginTop: 4 }}>
-                  ✕ {keyTestError || 'Clé API invalide. Vérifiez vos identifiants Google AI Studio.'}
+                  ✕ {keyTestError || 'Identifiants API invalides.'}
                 </p>
               )}
               <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                Votre clé personnelle est prioritaire, conservée sur votre appareil et utilisée directement sans bascule locale.
+                Les identifiants sont conservés dans ce navigateur et envoyés uniquement au backend LivreVox pour appeler le fournisseur choisi.
               </p>
             </div>
             <div className="lv-modal-actions">
