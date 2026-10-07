@@ -1,11 +1,11 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { zipSync } from 'fflate';
+import { createHash, createHmac } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,17 +40,159 @@ if (!fs.existsSync(STORAGE_DIR)) {
   fs.mkdirSync(STORAGE_DIR, { recursive: true });
 }
 
-// Helper to initialize Gemini SDK with required telemetry header
-function getAi(customKey?: string): GoogleGenAI {
-  const apiKey = (customKey || process.env.GEMINI_API_KEY || '').trim();
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
+type ProviderName = 'gemini' | 'deepinfra' | 'aws-polly';
+
+type ProviderCredentials = {
+  provider: ProviderName;
+  apiKey: string;
+  apiSecret?: string;
+  region?: string;
+};
+
+function normalizeProvider(value?: string): ProviderName {
+  if (value === 'deepinfra' || value === 'aws-polly') return value;
+  return 'gemini';
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function hmac(key: Buffer | string, value: string): Buffer {
+  return createHmac('sha256', key).update(value, 'utf8').digest();
+}
+
+async function synthesizeGemini(text: string, voice: string, apiKey: string) {
+  const model = process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-lite-tts';
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } },
+          },
+        },
+      }),
+    }
+  );
+  if (!response.ok) throw new Error(`Gemini TTS ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as any;
+  const part = payload?.candidates?.[0]?.content?.parts?.find((item: any) => item?.inlineData?.data);
+  if (!part?.inlineData?.data) throw new Error('Gemini n’a renvoyé aucun audio.');
+  return {
+    buffer: Buffer.from(part.inlineData.data, 'base64'),
+    mimeType: part.inlineData.mimeType || 'audio/wav',
+    extension: 'wav',
+  };
+}
+
+async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) {
+  const response = await fetch('https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      tts_response_format: 'mp3',
+      preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
+      speed: 1,
+      stream: false,
+    }),
   });
+  if (!response.ok) throw new Error(`DeepInfra Kokoro ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as { audio?: string };
+  if (!payload.audio) throw new Error('DeepInfra n’a renvoyé aucun audio.');
+  if (/^https?:\/\//.test(payload.audio)) {
+    const audio = await fetch(payload.audio);
+    if (!audio.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
+    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
+  }
+  const clean = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
+  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/mpeg', extension: 'mp3' };
+}
+
+async function synthesizePolly(text: string, voice: string, accessKeyId: string, secretAccessKey: string, region: string) {
+  const host = `polly.${region}.amazonaws.com`;
+  const endpoint = `https://${host}/v1/speech`;
+  const body = JSON.stringify({
+    Engine: 'neural',
+    LanguageCode: 'fr-FR',
+    OutputFormat: 'mp3',
+    Text: text,
+    TextType: 'text',
+    VoiceId: voice && voice !== 'Kore' ? voice : 'Lea',
+  });
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const canonicalHeaders = `content-type:application/json\nhost:${host}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'content-type;host;x-amz-date';
+  const canonicalRequest = ['POST', '/v1/speech', '', canonicalHeaders, signedHeaders, sha256Hex(body)].join('\n');
+  const scope = `${dateStamp}/${region}/polly/aws4_request`;
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256Hex(canonicalRequest)].join('\n');
+  const kDate = hmac(`AWS4${secretAccessKey}`, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'polly');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  const authorization = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Amz-Date': amzDate,
+      Authorization: authorization,
+    },
+    body,
+  });
+  if (!response.ok) throw new Error(`Amazon Polly ${response.status}: ${await response.text()}`);
+  return { buffer: Buffer.from(await response.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
+}
+
+async function synthesizeProviderSpeech(text: string, voice: string, credentials: ProviderCredentials) {
+  if (!credentials.apiKey) throw new Error('Clé API manquante.');
+  if (credentials.provider === 'deepinfra') return synthesizeDeepInfra(text, voice, credentials.apiKey);
+  if (credentials.provider === 'aws-polly') {
+    if (!credentials.apiSecret) throw new Error('AWS Secret Access Key manquante.');
+    return synthesizePolly(text, voice, credentials.apiKey, credentials.apiSecret, credentials.region || 'eu-west-3');
+  }
+  return synthesizeGemini(text, voice, credentials.apiKey);
+}
+
+async function generateTextWithProvider(prompt: string, credentials: ProviderCredentials): Promise<string> {
+  if (credentials.provider === 'aws-polly') {
+    throw new Error('Amazon Polly est un service vocal uniquement. Utilise Gemini ou DeepInfra pour les résumés IA.');
+  }
+  if (credentials.provider === 'deepinfra') {
+    const response = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.DEEPINFRA_TEXT_MODEL || 'meta-llama/Llama-3.3-70B-Instruct',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+      }),
+    });
+    if (!response.ok) throw new Error(`DeepInfra texte ${response.status}: ${await response.text()}`);
+    const payload = await response.json() as any;
+    return payload?.choices?.[0]?.message?.content || '';
+  }
+  const model = process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash';
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(credentials.apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }] }),
+    }
+  );
+  if (!response.ok) throw new Error(`Gemini texte ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as any;
+  return payload?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || '').join('') || '';
 }
 
 type CloudChapter = {
@@ -204,179 +346,47 @@ function splitTextForTts(text: string, maxLen = 7500): string[] {
 }
 
 /**
- * Synthesizes audio using Gemini Flash TTS.
- * Uses gemini-3.8-flash-lite-tts (primary high-throughput TTS model).
- * Processes segments with automated retry and backoff on 429/rate limits.
+ * Synthesizes a chapter with the selected provider. Long chapters are split server-side.
  */
-async function synthesizeSpeech(text: string, voiceName = 'Kore', customKey?: string): Promise<Buffer> {
-  const apiKey = (customKey || process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) {
-    throw new Error('Aucune clé API Gemini fournie. Veuillez renseigner votre clé API dans les Réglages.');
-  }
-
-  // Memorize key for this session if process.env.GEMINI_API_KEY was not set
-  if (!process.env.GEMINI_API_KEY && customKey) {
-    process.env.GEMINI_API_KEY = customKey.trim();
-  }
-
-  const ai = getAi(apiKey);
-  const segments = splitTextForTts(text).filter(s => s.trim().length > 0);
-  if (!segments.length) {
-    segments.push(text.trim() || 'Chapitre sans texte.');
-  }
-
-  const wavBuffers: Buffer[] = [];
-  const candidateModels = ['gemini-3.8-flash-lite-tts'];
-
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    let audioData: string | null = null;
-    let lastErr: any = null;
-
-    for (const model of candidateModels) {
-      for (let attempt = 0; attempt < 4; attempt++) {
-        try {
-          if (attempt > 0) {
-            const backoffMs = 2500 * Math.pow(2, attempt - 1);
-            console.log(`[Gemini TTS] Attente ${backoffMs}ms avant tentative ${attempt + 1}/4...`);
-            await new Promise(r => setTimeout(r, backoffMs));
-          }
-          const response = await ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: segment,
-                  },
-                ],
-              },
-            ],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' },
-                },
-              },
-            },
-          });
-
-          const candidate = response.candidates?.[0];
-          const audioPart = candidate?.content?.parts?.find(p => p.inlineData && p.inlineData.data);
-          if (audioPart?.inlineData?.data) {
-            audioData = audioPart.inlineData.data;
-            break;
-          }
-        } catch (err: any) {
-          lastErr = err;
-          const isRateLimit =
-            err?.message?.includes('429') ||
-            err?.message?.includes('RESOURCE_EXHAUSTED') ||
-            err?.status === 429;
-          if (isRateLimit && attempt < 3) {
-            console.warn(`[Gemini TTS] 429 débit atteint sur ${model}, pause exponentielle et réessai (${attempt + 1}/4)...`);
-            continue;
-          }
-          break;
-        }
+async function synthesizeSpeech(
+  text: string,
+  voiceName: string,
+  credentials: ProviderCredentials
+): Promise<{ buffer: Buffer; mimeType: string; extension: string }> {
+  const segments = splitTextForTts(text).filter(Boolean);
+  const outputs: Array<{ buffer: Buffer; mimeType: string; extension: string }> = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials));
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 900 * (attempt + 1)));
       }
-      if (audioData) break;
     }
-
-    if (!audioData) {
-      console.error(`[Gemini TTS] Erreur finale pour le segment ${i + 1}/${segments.length}:`, lastErr);
-      const isQuota =
-        lastErr?.message?.includes('429') ||
-        lastErr?.message?.includes('RESOURCE_EXHAUSTED') ||
-        lastErr?.status === 429;
-      if (isQuota) {
-        throw new Error('Débit temporaire Gemini atteint (429). Veuillez patienter quelques secondes avant de relancer.');
-      }
-      throw new Error(
-        lastErr?.message || `Échec de la synthèse vocale Gemini Flash pour le segment ${i + 1}.`
-      );
-    }
-
-    wavBuffers.push(Buffer.from(audioData, 'base64'));
-    if (i < segments.length - 1) {
-      // Throttle politely between segments to stay under RPM quotas
-      await new Promise(r => setTimeout(r, 1200));
-    }
+    if (lastError) throw lastError;
   }
-
-  return concatenateWavBuffers(wavBuffers);
+  if (!outputs.length) throw new Error('Aucun audio généré.');
+  const first = outputs[0];
+  if (first.mimeType.includes('wav')) {
+    return { ...first, buffer: concatenateWavBuffers(outputs.map(item => item.buffer)) };
+  }
+  return { ...first, buffer: Buffer.concat(outputs.map(item => item.buffer)) };
 }
 
 /**
- * Extracts and structures book chapters using Gemini 3.8 Flash (gemini-3.8-flash)
+ * Legacy cloud PDF extraction. The normal LivreVox flow now extracts PDF text locally.
  */
-async function extractBookFromPdf(pdfBuffer: Buffer, fileName: string): Promise<{ bookTitle: string; chapters: Array<{ title: string; text: string }> }> {
-  const ai = getAi();
-  const base64Pdf = pdfBuffer.toString('base64');
-
-  const prompt = `Tu es un expert éditeur de livres audio et analyste littéraire.
-Analyse ce document PDF et transforme-le en une structure de livre audio complète et propre.
-
-Règles de découpage et de nettoyage:
-1. Identifie le titre principal de l'œuvre.
-2. Découpe le texte en chapitres logiques et cohérents (ex: Chapitre 1 — Le départ, Chapitre 2 — ..., Prologue, etc.). Si le document est un article ou court récit, crée 1 à 3 sections pertinentes.
-3. Pour chaque chapitre, fournis le texte intégral destiné à être écouté:
-   - Supprime les en-têtes et pieds de page répétés, les numéros de page orphelins, les césures de mots ("par- exemple" -> "par exemple").
-   - Conserve l'intégralité du contenu narratif sans le résumer.
-4. Réponds UNIQUEMENT par un objet JSON valide conforme à cette structure exacte:
-{
-  "bookTitle": "Titre du livre",
-  "chapters": [
-    {
-      "title": "Nom du chapitre",
-      "text": "Texte narratif intégral de ce chapitre à lire à voix haute..."
-    }
-  ]
-}`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: [
-      {
-        inlineData: {
-          mimeType: 'application/pdf',
-          data: base64Pdf,
-        },
-      },
-      {
-        text: prompt,
-      },
-    ],
-    config: {
-      responseMimeType: 'application/json',
-    },
-  });
-
-  const responseText = response.text || '';
-  try {
-    const parsed = JSON.parse(responseText.trim());
-    if (parsed && Array.isArray(parsed.chapters) && parsed.chapters.length > 0) {
-      return {
-        bookTitle: parsed.bookTitle || fileName.replace(/\.pdf$/i, ''),
-        chapters: parsed.chapters,
-      };
-    }
-  } catch (err) {
-    console.warn('Failed to parse JSON response from Gemini Flash:', err, responseText);
-  }
-
-  // Fallback if parsing failed
-  return {
-    bookTitle: fileName.replace(/\.pdf$/i, ''),
-    chapters: [
-      {
-        title: 'Chapitre 1 — Lecture intégrale',
-        text: responseText.slice(0, 5000) || 'Contenu extrait du document.',
-      },
-    ],
-  };
+async function extractBookFromPdf(
+  _pdfBuffer: Buffer,
+  fileName: string
+): Promise<{ bookTitle: string; chapters: Array<{ title: string; text: string }> }> {
+  throw new Error(
+    `L’analyse cloud directe de ${fileName} est désactivée. Importe le PDF dans l’interface LivreVox : le texte est extrait localement, sans dépendre de Google AI Studio.`
+  );
 }
 
 async function startServer() {
