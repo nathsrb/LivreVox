@@ -53,35 +53,52 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-export function getStoredGeminiKey(): string | undefined {
+export type StoredProviderConfig = {
+  provider: 'gemini' | 'deepinfra' | 'aws-polly';
+  apiKey?: string;
+  apiSecret?: string;
+  region?: string;
+};
+
+export function getStoredProviderConfig(): StoredProviderConfig {
   try {
-    if (typeof localStorage === 'undefined') return undefined;
-    const direct = localStorage.getItem('auralis_gemini_api_key') || localStorage.getItem('gemini_api_key');
-    if (direct && direct.trim()) return direct.trim();
-    const rawA = localStorage.getItem('auralis-settings');
-    if (rawA) {
-      const parsed = JSON.parse(rawA);
-      if (parsed.geminiApiKey?.trim()) return parsed.geminiApiKey.trim();
-    }
-    const rawL = localStorage.getItem('livrevox-settings');
-    if (rawL) {
-      const parsed = JSON.parse(rawL);
-      if (parsed.geminiApiKey?.trim()) return parsed.geminiApiKey.trim();
-    }
-    return undefined;
+    if (typeof localStorage === 'undefined') return { provider: 'gemini' };
+    const read = (key: string) => {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : {};
+    };
+    const merged = { ...read('livrevox-settings'), ...read('auralis-settings') };
+    const legacyKey =
+      localStorage.getItem('auralis_gemini_api_key') ||
+      localStorage.getItem('gemini_api_key') ||
+      merged.geminiApiKey;
+    return {
+      provider: merged.ttsProvider || 'gemini',
+      apiKey: (merged.apiKey || legacyKey || '').trim() || undefined,
+      apiSecret: (merged.apiSecret || '').trim() || undefined,
+      region: (merged.awsRegion || 'eu-west-3').trim() || 'eu-west-3',
+    };
   } catch {
-    return undefined;
+    return { provider: 'gemini' };
   }
 }
 
+export function getStoredGeminiKey(): string | undefined {
+  const config = getStoredProviderConfig();
+  return config.provider === 'gemini' ? config.apiKey : undefined;
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const customKey = getStoredGeminiKey();
+  const config = getStoredProviderConfig();
   const response = await fetch(path, {
     ...init,
     headers: {
       Accept: 'application/json',
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(customKey ? { 'x-gemini-api-key': customKey } : {}),
+      'x-tts-provider': config.provider,
+      ...(config.apiKey ? { 'x-api-key': config.apiKey } : {}),
+      ...(config.apiSecret ? { 'x-api-secret': config.apiSecret } : {}),
+      ...(config.region ? { 'x-aws-region': config.region } : {}),
       ...(init?.headers ?? {}),
     },
   });
