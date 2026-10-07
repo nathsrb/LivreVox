@@ -1,6 +1,6 @@
 import { zipSync } from 'fflate';
 import { chunkForSpeech, sanitizeFileName } from './text';
-import { getStoredGeminiKey } from './cloud';
+import { getStoredProviderConfig } from './cloud';
 
 export type VoiceCatalogItem = {
   id: string;
@@ -159,21 +159,25 @@ async function synthesizeRemoteChunk(
   customApiKey?: string,
   cloudVoice?: string
 ): Promise<Blob> {
-  const activeKey = (customApiKey || getStoredGeminiKey() || '').trim();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
-  if (activeKey) {
-    headers['x-gemini-api-key'] = activeKey;
-  }
+  const stored = getStoredProviderConfig();
+  const activeKey = (customApiKey || stored.apiKey || '').trim();
   const response = await fetch('/api/tts', {
     method: 'POST',
-    headers,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'x-tts-provider': stored.provider,
+      ...(activeKey ? { 'x-api-key': activeKey } : {}),
+      ...(stored.apiSecret ? { 'x-api-secret': stored.apiSecret } : {}),
+      ...(stored.region ? { 'x-aws-region': stored.region } : {}),
+    },
     body: JSON.stringify({
       text,
+      provider: stored.provider,
       apiKey: activeKey || undefined,
-      voice: cloudVoice || 'Kore',
+      apiSecret: stored.apiSecret,
+      region: stored.region,
+      voice: cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore'),
     }),
   });
   let payload: RemoteTtsResponse = {};
@@ -184,7 +188,7 @@ async function synthesizeRemoteChunk(
   }
   if (!response.ok || !payload.audio) {
     throw new Error(
-      payload.error || `Gemini Flash TTS a échoué (${response.status}).`
+      payload.error || `La synthèse vocale distante a échoué (${response.status}).`
     );
   }
   return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
@@ -246,40 +250,34 @@ export async function synthesizeChapter(
   customApiKey?: string,
   cloudVoice?: string
 ): Promise<{ blob: Blob; duration: number }> {
-  const activeKey = (customApiKey || getStoredGeminiKey() || '').trim();
+  const stored = getStoredProviderConfig();
+  const activeKey = (customApiKey || stored.apiKey || '').trim();
   let useRemote = Boolean(activeKey) || (await isRemoteTtsAvailable(false));
 
   if (useRemote) {
     try {
-      if (text.length <= 18000) {
-        onProgress(30, `Gemini Flash (${cloudVoice || 'Kore'}) · Narration en cours...`);
-        const chunkBlob = await synthesizeRemoteChunk(text, activeKey, cloudVoice);
-        onProgress(100, `Audio Gemini Flash prêt`);
+      if (shouldCancel()) throw new Error('Génération annulée.');
+      const providerLabel =
+        stored.provider === 'deepinfra'
+          ? 'DeepInfra · Kokoro'
+          : stored.provider === 'aws-polly'
+            ? 'Amazon Polly'
+            : 'Gemini';
+      onProgress(25, `${providerLabel} · génération du chapitre...`);
+      const chunkBlob = await synthesizeRemoteChunk(text, activeKey, cloudVoice);
+      onProgress(100, `Audio ${providerLabel} prêt`);
+      if (chunkBlob.type.includes('wav')) {
         const meta = parseWav(await chunkBlob.arrayBuffer());
-        return {
-          blob: chunkBlob,
-          duration: meta.data.length / meta.byteRate,
-        };
+        return { blob: chunkBlob, duration: meta.data.length / meta.byteRate };
       }
-
-      const chunks = chunkForSpeech(text);
-      const blobs: Blob[] = [];
-      for (let index = 0; index < chunks.length; index += 1) {
-        if (shouldCancel()) throw new Error('Génération annulée.');
-        onProgress(
-          Math.round((index / chunks.length) * 100),
-          `Gemini Flash (${cloudVoice || 'Kore'}) · segment ${index + 1}/${chunks.length}`
-        );
-        const chunkBlob = await synthesizeRemoteChunk(chunks[index], activeKey, cloudVoice);
-        blobs.push(chunkBlob);
-      }
-      return mergeWavBlobs(blobs);
+      const estimatedDuration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
+      return { blob: chunkBlob, duration: estimatedDuration };
     } catch (remoteError: any) {
-      console.error('Gemini TTS erreur:', remoteError);
+      console.error('TTS distant erreur:', remoteError);
       if (activeKey) {
         throw new Error(
           remoteError?.message ||
-            'Échec de la génération avec la voix Gemini Flash. Veuillez vérifier votre clé API.'
+            'Échec de la génération vocale distante. Vérifiez le fournisseur et les identifiants API.'
         );
       }
       useRemote = false;
@@ -330,7 +328,7 @@ export async function synthesizeChapter(
   } catch (piperErr: any) {
     console.error('Erreur Piper local:', piperErr);
     throw new Error(
-      "Impossible de générer l'audio avec Gemini Flash. Veuillez vérifier votre connexion ou votre clé API."
+      "Impossible de générer l’audio distant ni avec Piper local. Vérifiez votre connexion ou vos réglages API."
     );
   }
 }
