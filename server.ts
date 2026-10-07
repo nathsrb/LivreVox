@@ -1007,17 +1007,17 @@ ${chapterText.slice(0, 48000)}`;
 
     try {
       job.status = 'generating_audio';
-      const customKey =
-        (req.headers['x-gemini-api-key'] as string) ||
-        (req.body as any)?.apiKey ||
-        process.env.GEMINI_API_KEY;
-      const audioBuffer = await synthesizeSpeech(targetChapter.text, voiceName || 'Kore', customKey);
+      const provider = normalizeProvider((req.body as any)?.provider || (req.headers['x-tts-provider'] as string) || process.env.TTS_PROVIDER);
+      const apiKey = String((req.body as any)?.apiKey || req.headers['x-api-key'] || (provider === 'deepinfra' ? process.env.DEEPINFRA_API_KEY : provider === 'aws-polly' ? process.env.AWS_ACCESS_KEY_ID : process.env.GEMINI_API_KEY) || '');
+      const apiSecret = String((req.body as any)?.apiSecret || req.headers['x-api-secret'] || process.env.AWS_SECRET_ACCESS_KEY || '');
+      const region = String((req.body as any)?.region || req.headers['x-aws-region'] || process.env.AWS_REGION || 'eu-west-3');
+      const audio = await synthesizeSpeech(targetChapter.text, voiceName || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'), { provider, apiKey, apiSecret, region });
       const outFile = audioPathFor(job.id, targetChapter.id);
-      fs.writeFileSync(outFile, audioBuffer);
+      fs.writeFileSync(outFile, audio.buffer);
 
       targetChapter.hasAudio = true;
       targetChapter.audioPath = `/api/cloud/audio/${job.id}/${targetChapter.id}`;
-      targetChapter.audioDuration = Math.round(audioBuffer.length / (24000 * 2)); // 24kHz 16-bit mono
+      targetChapter.audioDuration = Math.max(1, Math.round(targetChapter.words / 150 * 60))
 
       job.audioReady = job.chapters.filter(c => c.hasAudio).length;
       job.status = job.audioReady >= job.chapters.length ? 'complete' : 'ready';
@@ -1035,7 +1035,7 @@ ${chapterText.slice(0, 48000)}`;
       console.error('Audio generation error:', err);
       job.status = 'ready';
       saveJobToDisk(job);
-      res.status(500).json({ error: err?.message || 'Erreur lors de la synthèse vocale Gemini Flash.' });
+      res.status(500).json({ error: err?.message || 'Erreur lors de la synthèse vocale.' });
     }
   });
 
@@ -1051,14 +1051,14 @@ ${chapterText.slice(0, 48000)}`;
     }
 
     try {
-      const voice = (req.body as { voice?: string })?.voice || 'Kore';
-      const customKey =
-        (req.headers['x-gemini-api-key'] as string) ||
-        (req.body as any)?.apiKey ||
-        process.env.GEMINI_API_KEY;
-      const audioBuffer = await synthesizeSpeech(pending.text, voice, customKey);
+      const provider = normalizeProvider((req.body as any)?.provider || (req.headers['x-tts-provider'] as string) || process.env.TTS_PROVIDER);
+      const voice = (req.body as { voice?: string })?.voice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore');
+      const apiKey = String((req.body as any)?.apiKey || req.headers['x-api-key'] || (provider === 'deepinfra' ? process.env.DEEPINFRA_API_KEY : provider === 'aws-polly' ? process.env.AWS_ACCESS_KEY_ID : process.env.GEMINI_API_KEY) || '');
+      const apiSecret = String((req.body as any)?.apiSecret || req.headers['x-api-secret'] || process.env.AWS_SECRET_ACCESS_KEY || '');
+      const region = String((req.body as any)?.region || req.headers['x-aws-region'] || process.env.AWS_REGION || 'eu-west-3');
+      const audio = await synthesizeSpeech(pending.text, voice, { provider, apiKey, apiSecret, region });
       const outFile = audioPathFor(job.id, pending.id);
-      fs.writeFileSync(outFile, audioBuffer);
+      fs.writeFileSync(outFile, audio.buffer);
       pending.hasAudio = true;
       pending.audioPath = `/api/cloud/audio/${job.id}/${pending.id}`;
       job.audioReady = job.chapters.filter(c => c.hasAudio).length;
