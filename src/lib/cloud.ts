@@ -1,19 +1,15 @@
-type ProgressCallback = (stage: string, progress: number) => void;
+export const CLOUD_THRESHOLD_BYTES = Number.MAX_SAFE_INTEGER;
 
-export type CloudVoice = {
-  id: string;
-  name: string;
-  gender: string;
-};
+type ProgressCallback = (stage: string, progress: number) => void;
 
 export type CloudChapterStatus = {
   id: string;
-  index: number;
   title: string;
   text: string;
   words: number;
   estimatedMinutes: number;
-  hasAudio: boolean;
+  pageStart: number;
+  pageEnd: number;
   audioUrl?: string;
   audioMimeType?: string;
 };
@@ -25,176 +21,214 @@ export type CloudJobStatus = {
   size: number;
   status: string;
   pages: number;
+  nextPage: number;
   processingProgress: number;
   audioReady: number;
-  totalChapters?: number;
   ttsConfigured: boolean;
   ttsProvider: string;
+  needsOcrPage?: number | null;
   error?: string;
   chapters: CloudChapterStatus[];
-  createdAt?: number;
-  updatedAt?: number;
 };
 
 export type CloudCapabilities = {
   cloud: boolean;
-  mode: string;
   ttsConfigured: boolean;
   ttsProvider: string;
-  textModel: string;
   chunkUpload: boolean;
   ocr: boolean;
-  voices: CloudVoice[];
 };
 
-const api = {
-  get: async (url: string) => {
-    const res = await fetch(url);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    return { data: await res.json() };
-  },
-  post: async (url: string, body: unknown) => {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    return { data: await res.json() };
-  },
-  delete: async (url: string) => {
-    const res = await fetch(url, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    return { data: await res.json() };
-  },
-};
+type ApiErrorPayload = { error?: string; message?: string };
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
   const stride = 0x8000;
   for (let offset = 0; offset < bytes.length; offset += stride) {
-    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + stride, bytes.length)));
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, Math.min(offset + stride, bytes.length))
+    );
   }
   return btoa(binary);
 }
 
+export function getStoredGeminiKey(): string | undefined {
+  try {
+    if (typeof localStorage === 'undefined') return undefined;
+    const direct = localStorage.getItem('auralis_gemini_api_key') || localStorage.getItem('gemini_api_key');
+    if (direct && direct.trim()) return direct.trim();
+    const rawA = localStorage.getItem('auralis-settings');
+    if (rawA) {
+      const parsed = JSON.parse(rawA);
+      if (parsed.geminiApiKey?.trim()) return parsed.geminiApiKey.trim();
+    }
+    const rawL = localStorage.getItem('livrevox-settings');
+    if (rawL) {
+      const parsed = JSON.parse(rawL);
+      if (parsed.geminiApiKey?.trim()) return parsed.geminiApiKey.trim();
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const customKey = getStoredGeminiKey();
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(customKey ? { 'x-gemini-api-key': customKey } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    // Les erreurs réseau/HTTP sont gérées juste après.
+  }
+  if (!response.ok) {
+    const details = payload as ApiErrorPayload | null;
+    throw new Error(
+      details?.error || details?.message || `Erreur API (${response.status}).`
+    );
+  }
+  return payload as T;
+}
+
+async function withRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts)
+        await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Échec de la transmission.');
+}
+
 export async function getCloudCapabilities(): Promise<CloudCapabilities> {
   try {
-    const response = await api.get('/api/cloud/capabilities');
-    return response.data as CloudCapabilities;
+    const health = await requestJson<{
+      ttsConfigured?: boolean;
+      provider?: string;
+    }>('/api/health');
+    return {
+      cloud: false,
+      chunkUpload: false,
+      ocr: false,
+      ttsConfigured: Boolean(health.ttsConfigured),
+      ttsProvider: health.provider || 'local-fallback',
+    };
   } catch {
     return {
-      cloud: true,
-      mode: '100% Cloud Gemini Flash',
+      cloud: false,
+      chunkUpload: false,
+      ocr: false,
       ttsConfigured: false,
-      ttsProvider: 'gemini-3.8-flash-lite-tts',
-      textModel: 'gemini-3.8-flash',
-      chunkUpload: true,
-      ocr: true,
-      voices: [
-        { id: 'Kore', name: 'Kore (Voix féminine claire et douce)', gender: 'female' },
-        { id: 'Puck', name: 'Puck (Voix masculine expressive)', gender: 'male' },
-        { id: 'Zephyr', name: 'Zephyr (Voix calme et posée)', gender: 'neutral' },
-        { id: 'Charon', name: 'Charon (Voix grave et narrative)', gender: 'male' },
-        { id: 'Fenrir', name: 'Fenrir (Voix dynamique)', gender: 'male' },
-      ],
+      ttsProvider: 'local-fallback',
     };
   }
 }
 
-export async function getCloudBooks(): Promise<CloudJobStatus[]> {
-  try {
-    const response = await api.get('/api/cloud/books');
-    return response.data as CloudJobStatus[];
-  } catch (err) {
-    console.warn('Failed to fetch cloud books:', err);
-    return [];
-  }
-}
-
-export async function uploadPdfToCloud(file: File, onProgress: ProgressCallback): Promise<string> {
-  onProgress('Lecture et encodage du PDF...', 10);
-  const buffer = await file.arrayBuffer();
-
-  // If file <= 15MB, upload directly in one call
-  if (file.size <= 15 * 1024 * 1024) {
-    onProgress('Envoi au cloud Gemini Flash...', 30);
-    const base64Pdf = arrayBufferToBase64(buffer);
-    const response = await api.post('/api/cloud/upload', {
+// Ces fonctions sont conservées pour ouvrir d'anciens livres cloud sans lier
+// le frontend à AppDeploy. Un hébergeur peut réimplémenter ces routes si besoin.
+export async function uploadPdfToCloud(
+  file: File,
+  onProgress: ProgressCallback
+): Promise<string> {
+  const start = await requestJson<{ id: string; chunkSize: number }>('/api/cloud/jobs', {
+    method: 'POST',
+    body: JSON.stringify({
       name: file.name,
-      title: file.name.replace(/\.pdf$/i, '').trim(),
-      base64Pdf,
-    });
-    onProgress('Analyse et structuration des chapitres par Gemini Flash...', 60);
-    const data = response.data as { id: string };
-    return data.id;
-  }
-
-  // Chunked upload for larger files
-  onProgress('Initialisation de l’envoi cloud...', 5);
-  const start = await api.post('/api/cloud/jobs', {
-    name: file.name,
-    title: file.name.replace(/\.pdf$/i, '').trim(),
-    size: file.size,
+      title: file.name.replace(/\.pdf$/i, '').trim() || 'Livre sans titre',
+      size: file.size,
+      mimeType: file.type || 'application/pdf',
+    }),
   });
-  const { id, chunkSize, totalParts } = start.data as { id: string; chunkSize: number; totalParts: number };
+  const { id, chunkSize } = start;
+  const totalParts = Math.ceil(file.size / chunkSize);
+  let nextIndex = 0;
+  let completed = 0;
 
-  for (let index = 0; index < totalParts; index += 1) {
-    const begin = index * chunkSize;
-    const end = Math.min(file.size, begin + chunkSize);
-    const chunkData = arrayBufferToBase64(buffer.slice(begin, end));
-    await api.post(`/api/cloud/jobs/${id}/chunk`, { index, data: chunkData });
-    const progress = 10 + Math.round(((index + 1) / totalParts) * 50);
-    onProgress(`Envoi cloud · bloc ${index + 1}/${totalParts}`, progress);
-  }
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= totalParts) return;
+      const begin = index * chunkSize;
+      const end = Math.min(file.size, begin + chunkSize);
+      const data = arrayBufferToBase64(
+        await file.slice(begin, end).arrayBuffer()
+      );
+      await withRetry(() =>
+        requestJson(`/api/cloud/jobs/${id}/chunk`, {
+          method: 'POST',
+          body: JSON.stringify({ index, data }),
+        })
+      );
+      completed += 1;
+      const ratio = completed / Math.max(1, totalParts);
+      onProgress(
+        `Envoi cloud · bloc ${completed}/${totalParts}`,
+        4 + Math.round(ratio * 54)
+      );
+    }
+  };
 
-  onProgress('Validation du document et analyse par Gemini Flash...', 65);
-  await api.post(`/api/cloud/jobs/${id}/complete`, {});
+  await Promise.all([worker(), worker(), worker()]);
+  onProgress('Validation du fichier dans le cloud', 60);
+  await requestJson(`/api/cloud/jobs/${id}/complete`, {
+    method: 'POST',
+    body: JSON.stringify({ totalParts }),
+  });
   return id;
 }
 
 export async function getCloudJob(jobId: string): Promise<CloudJobStatus> {
-  const response = await api.get(`/api/cloud/jobs/${jobId}`);
-  return response.data as CloudJobStatus;
+  return requestJson<CloudJobStatus>(`/api/cloud/jobs/${jobId}`);
 }
 
-export async function generateCloudChapterAudio(
-  jobId: string,
-  chapterId: string,
-  voiceName: string
-): Promise<{ ok: boolean; audioUrl: string; audioReady: number }> {
-  const response = await api.post(`/api/cloud/jobs/${jobId}/generate-audio`, {
-    chapterId,
-    voiceName,
+export async function processCloudStep(jobId: string): Promise<CloudJobStatus> {
+  return requestJson<CloudJobStatus>(`/api/cloud/jobs/${jobId}/process-next`, {
+    method: 'POST',
+    body: '{}',
   });
-  return response.data as { ok: boolean; audioUrl: string; audioReady: number };
 }
 
-export async function generateNextCloudAudio(
-  jobId: string,
-  voiceName: string
+export async function generateCloudAudioStep(
+  jobId: string
 ): Promise<CloudJobStatus> {
-  const response = await api.post(`/api/cloud/jobs/${jobId}/generate-audio`, {
-    voiceName,
+  return requestJson<CloudJobStatus>(`/api/cloud/jobs/${jobId}/tts-next`, {
+    method: 'POST',
+    body: '{}',
   });
-  return response.data as CloudJobStatus;
 }
 
-export async function createDemoCloudBook(): Promise<CloudJobStatus> {
-  const response = await api.post('/api/cloud/demo', {});
-  return response.data as CloudJobStatus;
+export async function submitCloudOcrPage(
+  jobId: string,
+  pageNumber: number,
+  pageImage: Blob
+): Promise<CloudJobStatus> {
+  const image = arrayBufferToBase64(await pageImage.arrayBuffer());
+  return requestJson<CloudJobStatus>(`/api/cloud/jobs/${jobId}/ocr-page`, {
+    method: 'POST',
+    body: JSON.stringify({
+      pageNumber,
+      image: { data: image, mimeType: pageImage.type || 'image/jpeg' },
+    }),
+  });
 }
 
 export async function deleteCloudJob(jobId: string): Promise<void> {
-  await api.delete(`/api/cloud/jobs/${jobId}`);
+  await requestJson(`/api/cloud/jobs/${jobId}`, { method: 'DELETE' });
 }

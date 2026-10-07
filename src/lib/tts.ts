@@ -1,5 +1,6 @@
 import { zipSync } from 'fflate';
 import { chunkForSpeech, sanitizeFileName } from './text';
+import { getStoredGeminiKey } from './cloud';
 
 export type VoiceCatalogItem = {
   id: string;
@@ -127,7 +128,7 @@ function base64ToBlob(base64: string, mimeType: string): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
-async function isRemoteTtsAvailable(force = false): Promise<boolean> {
+export async function isRemoteTtsAvailable(force = false): Promise<boolean> {
   if (!force && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
     return remoteCapabilityCache.value;
   try {
@@ -143,18 +144,37 @@ async function isRemoteTtsAvailable(force = false): Promise<boolean> {
   }
 }
 
-async function synthesizeRemoteChunk(text: string, customApiKey?: string): Promise<Blob> {
+export const CLOUD_VOICES = [
+  { id: 'Kore', label: 'Kore · Féminine (chaleureuse, posée, idéale romans)', gender: 'Femme' },
+  { id: 'Puck', label: 'Puck · Masculine (jeune, dynamique et rythmée)', gender: 'Homme' },
+  { id: 'Zephyr', label: 'Zephyr · Voix calme (douce, discrète et claire)', gender: 'Neutre' },
+  { id: 'Charon', label: 'Charon · Masculine (grave, profonde, narrateur)', gender: 'Homme' },
+  { id: 'Fenrir', label: 'Fenrir · Masculine (posée, articulée et affirmée)', gender: 'Homme' },
+  { id: 'Aoede', label: 'Aoede · Féminine (expressive, naturelle et vivante)', gender: 'Femme' },
+  { id: 'Leda', label: 'Leda · Féminine (calme, claire et apaisante)', gender: 'Femme' },
+];
+
+async function synthesizeRemoteChunk(
+  text: string,
+  customApiKey?: string,
+  cloudVoice?: string
+): Promise<Blob> {
+  const activeKey = (customApiKey || getStoredGeminiKey() || '').trim();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
   };
-  if (customApiKey) {
-    headers['x-gemini-api-key'] = customApiKey;
+  if (activeKey) {
+    headers['x-gemini-api-key'] = activeKey;
   }
   const response = await fetch('/api/tts', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ text, apiKey: customApiKey }),
+    body: JSON.stringify({
+      text,
+      apiKey: activeKey || undefined,
+      voice: cloudVoice || 'Kore',
+    }),
   });
   let payload: RemoteTtsResponse = {};
   try {
@@ -164,7 +184,7 @@ async function synthesizeRemoteChunk(text: string, customApiKey?: string): Promi
   }
   if (!response.ok || !payload.audio) {
     throw new Error(
-      payload.error || `Gemini TTS a échoué (${response.status}).`
+      payload.error || `Gemini Flash TTS a échoué (${response.status}).`
     );
   }
   return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
@@ -223,87 +243,96 @@ export async function synthesizeChapter(
   voiceId: string,
   onProgress: (value: number, label: string) => void,
   shouldCancel: () => boolean,
-  customApiKey?: string
+  customApiKey?: string,
+  cloudVoice?: string
 ): Promise<{ blob: Blob; duration: number }> {
-  const chunks = chunkForSpeech(text);
-  const blobs: Blob[] = [];
-  let useRemote = Boolean(customApiKey) || (await isRemoteTtsAvailable(false));
+  const activeKey = (customApiKey || getStoredGeminiKey() || '').trim();
+  let useRemote = Boolean(activeKey) || (await isRemoteTtsAvailable(false));
 
   if (useRemote) {
     try {
+      if (text.length <= 18000) {
+        onProgress(30, `Gemini Flash (${cloudVoice || 'Kore'}) · Narration en cours...`);
+        const chunkBlob = await synthesizeRemoteChunk(text, activeKey, cloudVoice);
+        onProgress(100, `Audio Gemini Flash prêt`);
+        const meta = parseWav(await chunkBlob.arrayBuffer());
+        return {
+          blob: chunkBlob,
+          duration: meta.data.length / meta.byteRate,
+        };
+      }
+
+      const chunks = chunkForSpeech(text);
+      const blobs: Blob[] = [];
       for (let index = 0; index < chunks.length; index += 1) {
         if (shouldCancel()) throw new Error('Génération annulée.');
         onProgress(
           Math.round((index / chunks.length) * 100),
-          `Gemini Cloud · segment ${index + 1}/${chunks.length}`
+          `Gemini Flash (${cloudVoice || 'Kore'}) · segment ${index + 1}/${chunks.length}`
         );
-        const chunkBlob = await synthesizeRemoteChunk(chunks[index], customApiKey);
+        const chunkBlob = await synthesizeRemoteChunk(chunks[index], activeKey, cloudVoice);
         blobs.push(chunkBlob);
       }
+      return mergeWavBlobs(blobs);
     } catch (remoteError: any) {
-      console.warn('Gemini TTS indisponible ou quota atteint, bascule automatique sur Piper TTS local:', remoteError);
-      if (!customApiKey) {
-        // Désactiver le cloud temporairement pour ne pas relancer des 429 sur la clé par défaut
-        remoteCapabilityCache = { value: false, expiresAt: Date.now() + 15 * 60 * 1000 };
+      console.error('Gemini TTS erreur:', remoteError);
+      if (activeKey) {
+        throw new Error(
+          remoteError?.message ||
+            'Échec de la génération avec la voix Gemini Flash. Veuillez vérifier votre clé API.'
+        );
       }
       useRemote = false;
-      blobs.length = 0;
-      onProgress(5, 'Quota Gemini atteint · Bascule automatique sur Piper (Voix locale)');
     }
   }
 
-  if (!useRemote) {
-    try {
-      const piper = await import('@mintplex-labs/piper-tts-web');
-      const stored = await piper.stored();
-      
-      // Si la voix locale demandée n'est pas encore téléchargée, on la prépare
-      const effectiveVoiceId = stored.includes(voiceId) ? voiceId : (stored[0] || voiceId);
-      if (!stored.includes(effectiveVoiceId)) {
-        onProgress(10, `Téléchargement de la voix locale (${effectiveVoiceId})...`);
-        await piper.download(effectiveVoiceId, progress => {
+  // Secours Piper TTS local
+  const chunks = chunkForSpeech(text);
+  const blobs: Blob[] = [];
+  try {
+    const piper = await import('@mintplex-labs/piper-tts-web');
+    const stored = await piper.stored();
+    const effectiveVoiceId = stored.includes(voiceId) ? voiceId : (stored[0] || voiceId);
+    if (!stored.includes(effectiveVoiceId)) {
+      onProgress(10, `Téléchargement de la voix locale (${effectiveVoiceId})...`);
+      await piper.download(effectiveVoiceId, progress => {
+        if (progress.loaded !== undefined && progress.total) {
+          const downloadPart = progress.loaded / progress.total;
+          onProgress(
+            Math.round(10 + downloadPart * 30),
+            `Téléchargement voix locale · ${Math.round(downloadPart * 100)} %`
+          );
+        }
+      });
+    }
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (shouldCancel()) throw new Error('Génération annulée.');
+      onProgress(
+        Math.round(40 + (index / chunks.length) * 55),
+        `Synthèse locale Piper · segment ${index + 1}/${chunks.length}`
+      );
+      const wav = await piper.predict(
+        { text: chunks[index], voiceId: effectiveVoiceId },
+        progress => {
           if (progress.loaded !== undefined && progress.total) {
-            const downloadPart = progress.loaded / progress.total;
+            const part = progress.loaded / progress.total;
             onProgress(
-              Math.round(10 + downloadPart * 30),
-              `Téléchargement voix locale · ${Math.round(downloadPart * 100)} %`
+              Math.round(40 + ((index + part) / chunks.length) * 55),
+              `Synthèse vocale locale · ${Math.round(part * 100)} %`
             );
           }
-        });
-      }
-
-      for (let index = 0; index < chunks.length; index += 1) {
-        if (shouldCancel()) throw new Error('Génération annulée.');
-        onProgress(
-          Math.round(40 + (index / chunks.length) * 55),
-          `Synthèse locale Piper · segment ${index + 1}/${chunks.length}`
-        );
-        const wav = await piper.predict(
-          { text: chunks[index], voiceId: effectiveVoiceId },
-          progress => {
-            if (progress.loaded !== undefined && progress.total) {
-              const part = progress.loaded / progress.total;
-              onProgress(
-                Math.round(40 + ((index + part) / chunks.length) * 55),
-                `Synthèse vocale locale · ${Math.round(part * 100)} %`
-              );
-            }
-          }
-        );
-        blobs.push(wav);
-      }
-    } catch (piperErr: any) {
-      console.error('Erreur Piper local:', piperErr);
-      throw new Error(
-        "Le quota gratuit Gemini (10 requêtes/jour) a été atteint. Pour continuer à générer des fichiers WAV, renseignez votre clé Gemini dans les réglages (icône roue crantée), ou écoutez directement le texte grâce au bouton « Voix système »."
+        }
       );
+      blobs.push(wav);
     }
+    return mergeWavBlobs(blobs);
+  } catch (piperErr: any) {
+    console.error('Erreur Piper local:', piperErr);
+    throw new Error(
+      "Impossible de générer l'audio avec Gemini Flash. Veuillez vérifier votre connexion ou votre clé API."
+    );
   }
-
-  onProgress(96, 'Assemblage du chapitre audio');
-  const merged = await mergeWavBlobs(blobs);
-  onProgress(100, 'Chapitre prêt');
-  return merged;
 }
 
 export async function makeBookZip(

@@ -16,5 +16,3 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npm run build
-      - run: node --check server/gemini.mjs
-      - run: node --check server/index.mjs

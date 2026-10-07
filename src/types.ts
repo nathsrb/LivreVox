@@ -8,6 +8,9 @@ export type Chapter = {
   audioMimeType?: string;
   pageStart?: number;
   pageEnd?: number;
+  summary?: string;
+  summaryLoading?: boolean;
+  lastPositionSeconds?: number;
 };
 
 export type Book = {
@@ -42,6 +45,7 @@ export type AudioRecord = {
 export type AppSettings = {
   rate: number;
   voiceId: string;
+  cloudVoice?: string;
   systemVoiceUri: string;
   ocrLang: 'fra' | 'eng' | 'fra+eng';
   autoOcr: boolean;

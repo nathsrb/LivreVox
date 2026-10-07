@@ -1,22 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  Brain,
   CheckCircle2,
   ChevronRight,
-  CircleStop,
   Download,
+  ExternalLink,
   FileAudio,
   FileText,
+  GitBranch,
   Headphones,
   LockKeyhole,
+  Maximize2,
+  Minimize2,
+  Moon,
+  Pause,
   Pencil,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
+  RotateCw,
   Settings,
   ShieldCheck,
+  SkipBack,
+  SkipForward,
   Sparkles,
-  Square,
   Trash2,
   Upload,
   Volume2,
@@ -58,6 +67,7 @@ import {
   putBook,
 } from './lib/storage';
 import {
+  CLOUD_VOICES,
   downloadVoice,
   getStoredVoices,
   getVoiceCatalog,
@@ -70,6 +80,7 @@ import {
 const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
   voiceId: 'fr_FR-siwis-medium',
+  cloudVoice: 'Kore',
   systemVoiceUri: '',
   ocrLang: 'fra+eng',
   autoOcr: true,
@@ -103,15 +114,50 @@ function uid(): string {
   return crypto.randomUUID();
 }
 
+const SPEEDS = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+
 function loadSettings(): AppSettings {
   try {
-    const raw = localStorage.getItem('livrevox-settings');
-    return raw
-      ? { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<AppSettings>) }
-      : DEFAULT_SETTINGS;
+    const rawA = localStorage.getItem('auralis-settings');
+    const rawL = localStorage.getItem('livrevox-settings');
+    const directKey =
+      localStorage.getItem('auralis_gemini_api_key') ||
+      localStorage.getItem('gemini_api_key');
+    const parsedA = rawA ? (JSON.parse(rawA) as Partial<AppSettings>) : {};
+    const parsedL = rawL ? (JSON.parse(rawL) as Partial<AppSettings>) : {};
+    const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsedL, ...parsedA };
+    if (directKey && directKey.trim()) {
+      merged.geminiApiKey = directKey.trim();
+    }
+    const savedRate = localStorage.getItem('auralis_playback_rate');
+    if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
+    return merged;
   } catch {
     return DEFAULT_SETTINGS;
   }
+}
+
+function renderFormattedSummary(text: string) {
+  const sections = text.split(/(?=### )/g).filter(Boolean);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      {sections.map((sec, idx) => {
+        const lines = sec.trim().split('\n');
+        const header = lines[0].replace(/^###\s*/, '').trim();
+        const body = lines.slice(1).join('\n').replace(/^---\s*$/gm, '').trim();
+        const isHighlight = header.includes('30 secondes') || header.includes('retenir qu’une seule chose');
+
+        return (
+          <div key={idx} className={`lv-summary-section ${isHighlight ? 'lv-summary-highlight-box' : ''}`}>
+            <h3>{header}</h3>
+            <div style={{ whiteSpace: 'pre-wrap', fontSize: '14px', lineHeight: 1.65 }}>
+              {body}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function saveAs(blob: Blob, filename: string): void {
@@ -150,7 +196,7 @@ export default function AudiobookApp() {
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [chapterId, setChapterId] = useState('');
-  const [tab, setTab] = useState<'listen' | 'chapters' | 'export'>('listen');
+  const [tab, setTab] = useState<'listen' | 'chapters' | 'summary' | 'export'>('listen');
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(
@@ -178,12 +224,46 @@ export default function AudiobookApp() {
   const [renameChapter, setRenameChapter] = useState<Chapter | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
+  const [deleteChapterTarget, setDeleteChapterTarget] = useState<Chapter | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [keyTestStatus, setKeyTestStatus] = useState<'idle' | 'testing' | 'valid' | 'invalid'>('idle');
+  const [keyTestError, setKeyTestError] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<{ fileName: string; incorrect: boolean } | null>(null);
   const [passwordValue, setPasswordValue] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const cancelGeneration = useRef(false);
   const passwordResolver = useRef<((password: string | null) => void) | null>(null);
+
+  const [audioPlaying, setAudioPlaying] = useState(false);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [isImmersiveOpen, setIsImmersiveOpen] = useState(false);
+  const [autoPlayNext, setAutoPlayNext] = useState(true);
+  const [dockedDismissed, setDockedDismissed] = useState(false);
+  const [githubModalOpen, setGithubModalOpen] = useState(false);
+  const [githubToken, setGithubToken] = useState(() => localStorage.getItem('auralis_github_token') || '');
+  const [githubSyncing, setGithubSyncing] = useState(false);
+  const [githubSyncResult, setGithubSyncResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [sleepTimerMinutes, setSleepTimerMinutes] = useState<number | null>(null);
+  const [sleepRemainingSeconds, setSleepRemainingSeconds] = useState<number | null>(null);
+  const [resumeState, setResumeState] = useState<{
+    bookId: string;
+    chapterId: string;
+    currentTime: number;
+    duration: number;
+    rate: number;
+    bookTitle: string;
+    chapterTitle: string;
+    timestamp: number;
+  } | null>(() => {
+    try {
+      const raw = localStorage.getItem('auralis_resume_state');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
 
   const selectedBook = useMemo(
     () => books.find(book => book.id === selectedId) ?? null,
@@ -216,6 +296,26 @@ export default function AudiobookApp() {
       0
     ) ?? 0;
 
+  const paragraphs = useMemo(() => {
+    if (!selectedChapter?.text) return [];
+    return selectedChapter.text
+      .split(/\n\s*\n/)
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+  }, [selectedChapter?.text]);
+
+  const activeParagraphIndex = useMemo(() => {
+    if (!paragraphs.length) return 0;
+    const progress =
+      playableAudioUrl && audioDuration > 0
+        ? audioCurrentTime / audioDuration
+        : speechProgress / 100;
+    return Math.min(
+      paragraphs.length - 1,
+      Math.floor(progress * paragraphs.length)
+    );
+  }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime, speechProgress]);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -238,7 +338,12 @@ export default function AudiobookApp() {
   }, []);
 
   useEffect(() => {
+    localStorage.setItem('auralis-settings', JSON.stringify(settings));
     localStorage.setItem('livrevox-settings', JSON.stringify(settings));
+    if (settings.geminiApiKey?.trim()) {
+      localStorage.setItem('auralis_gemini_api_key', settings.geminiApiKey.trim());
+      localStorage.setItem('gemini_api_key', settings.geminiApiKey.trim());
+    }
   }, [settings]);
 
   useEffect(() => {
@@ -286,15 +391,98 @@ export default function AudiobookApp() {
     if (audioRef.current) audioRef.current.playbackRate = settings.rate;
   }, [settings.rate, audioUrl]);
 
+  // Enregistrement régulier de la position de reprise
+  useEffect(() => {
+    if (!audioPlaying || !selectedBook || !selectedChapter) return;
+    const interval = setInterval(() => {
+      if (audioRef.current && audioRef.current.currentTime > 2) {
+        localStorage.setItem(
+          'auralis_resume_state',
+          JSON.stringify({
+            bookId: selectedBook.id,
+            chapterId: selectedChapter.id,
+            currentTime: Math.floor(audioRef.current.currentTime),
+            duration: Math.floor(audioRef.current.duration || 0),
+            rate: settings.rate,
+            bookTitle: selectedBook.title,
+            chapterTitle: selectedChapter.title,
+            timestamp: Date.now(),
+          })
+        );
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [audioPlaying, selectedBook?.id, selectedChapter?.id, settings.rate]);
+
+  // Support Media Session API (écran verrouillé et contrôles multimédias)
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !selectedBook || !selectedChapter) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: selectedChapter.title,
+        artist: 'Auralis',
+        album: selectedBook.title,
+      });
+      navigator.mediaSession.setActionHandler('play', () => {
+        void audioRef.current?.play().catch(() => undefined);
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        audioRef.current?.pause();
+      });
+      navigator.mediaSession.setActionHandler('seekbackward', () => {
+        handleSkip(-15);
+      });
+      navigator.mediaSession.setActionHandler('seekforward', () => {
+        handleSkip(15);
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        goToPrevChapter();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        goToNextChapter(false);
+      });
+      navigator.mediaSession.setActionHandler('seekto', details => {
+        if (details.seekTime !== undefined && audioRef.current) {
+          seekTo(details.seekTime);
+        }
+      });
+    } catch {
+      // Ignorer si le navigateur ne supporte pas certaines actions
+    }
+  }, [selectedBook?.title, selectedChapter?.title]);
+
+  useEffect(() => {
+    if (sleepTimerMinutes === null) {
+      setSleepRemainingSeconds(null);
+      return;
+    }
+    setSleepRemainingSeconds(sleepTimerMinutes * 60);
+    const interval = setInterval(() => {
+      setSleepRemainingSeconds(prev => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          if (audioRef.current) audioRef.current.pause();
+          window.speechSynthesis?.cancel();
+          setSpeechState('idle');
+          setAudioPlaying(false);
+          setSleepTimerMinutes(null);
+          showToast('Minuterie de veille : lecture mise en pause.');
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [sleepTimerMinutes]);
+
   function showToast(message: string, error = false): void {
     let cleanMessage = message;
     if (
       message.includes('429') ||
       message.includes('RESOURCE_EXHAUSTED') ||
-      message.includes('exceeded your current quota') ||
-      message.includes('quota')
+      message.includes('exceeded your current quota')
     ) {
-      cleanMessage = 'Quota Gemini atteint : bascule automatique sur la voix locale Piper (illimitée et sans quota).';
+      cleanMessage = 'Débit temporaire Gemini atteint (429). Conseil : utilisez « Voix directe » pour écouter immédiatement sans attente.';
     }
     setToast({ message: cleanMessage, error });
     window.setTimeout(() => setToast(null), 5500);
@@ -352,7 +540,7 @@ export default function AudiobookApp() {
   }
 
   function selectBook(book: Book): void {
-    stopSpeech();
+    stopAllPlayback();
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
     setTab('listen');
@@ -415,7 +603,7 @@ export default function AudiobookApp() {
     }
     setImportProgress(null);
     if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
-    else if (status.status === 'password_protected') showToast('PDF protégé détecté : LivreVox repasse automatiquement en traitement local sécurisé.', true);
+    else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
     else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte cloud prêt. La voix cloud s’activera dès qu’une clé TTS sera configurée ; Piper reste disponible en secours.');
   }
 
@@ -499,10 +687,321 @@ export default function AudiobookApp() {
     showToast('Livre démo ajouté. Tu peux tester tout le lecteur.');
   }
 
+  function formatTime(totalSeconds: number): string {
+    if (!totalSeconds || isNaN(totalSeconds) || totalSeconds < 0) return '0:00';
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  }
+
   function stopSpeech(): void {
     window.speechSynthesis?.cancel();
     setSpeechState('idle');
     setSpeechProgress(0);
+  }
+
+  function stopAllPlayback(): void {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    setAudioPlaying(false);
+    setAudioCurrentTime(0);
+    stopSpeech();
+  }
+
+  function updateRate(newRate: number): void {
+    setSettings(current => ({ ...current, rate: newRate }));
+    localStorage.setItem('auralis_playback_rate', String(newRate));
+    if (audioRef.current) audioRef.current.playbackRate = newRate;
+  }
+
+  function handleResume(): void {
+    if (!resumeState) return;
+    const targetBook = books.find(b => b.id === resumeState.bookId);
+    if (!targetBook) {
+      setResumeState(null);
+      localStorage.removeItem('auralis_resume_state');
+      return;
+    }
+    setSelectedId(targetBook.id);
+    const targetChapter = targetBook.chapters.find(c => c.id === resumeState.chapterId) || targetBook.chapters[0];
+    if (targetChapter) {
+      setChapterId(targetChapter.id);
+      setTab('listen');
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.currentTime = resumeState.currentTime;
+          audioRef.current.playbackRate = resumeState.rate || settings.rate;
+          void audioRef.current.play().catch(() => undefined);
+          setAudioPlaying(true);
+        }
+      }, 350);
+    }
+    setResumeState(null);
+    showToast(`Reprise de « ${resumeState.chapterTitle} »`);
+  }
+
+  async function confirmDeleteChapter(): Promise<void> {
+    if (!selectedBook || !deleteChapterTarget) return;
+    if (selectedBook.chapters.length <= 1) {
+      showToast('Impossible de supprimer le seul chapitre restant de ce livre.', true);
+      setDeleteChapterTarget(null);
+      return;
+    }
+    const target = deleteChapterTarget;
+    const remaining = selectedBook.chapters.filter(c => c.id !== target.id);
+    await deleteAudio(selectedBook.id, target.id).catch(() => undefined);
+    const updated: Book = {
+      ...selectedBook,
+      updatedAt: Date.now(),
+      chapters: remaining,
+    };
+    await putBook(updated);
+    setBooks(current => current.map(b => (b.id === updated.id ? updated : b)));
+    if (chapterId === target.id) {
+      setChapterId(remaining[0].id);
+      setAudioCurrentTime(0);
+    }
+    setDeleteChapterTarget(null);
+    showToast(`Chapitre « ${target.title} » supprimé.`);
+  }
+
+  async function generateCurrentAndPlay(): Promise<void> {
+    if (!selectedBook || !selectedChapter) return;
+    showToast(`Génération de la voix Gemini Flash pour « ${selectedChapter.title} »...`);
+    const record = await generateOne(selectedBook, selectedChapter, 'chapter');
+    if (record) {
+      showToast(`Audio Gemini Flash prêt ! Démarrage de l'écoute.`);
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.currentTime = 0;
+          void audioRef.current.play().catch(() => undefined);
+          setAudioPlaying(true);
+        }
+      }, 300);
+    }
+  }
+
+  function togglePlayPause(): void {
+    if (playableAudioUrl && audioRef.current) {
+      if (audioPlaying) {
+        audioRef.current.pause();
+      } else {
+        stopSpeech();
+        void audioRef.current.play().catch(e => {
+          console.error('Audio playback error:', e);
+        });
+      }
+    } else {
+      void generateCurrentAndPlay();
+    }
+  }
+
+  async function generateChapterSummary(chapter: Chapter): Promise<void> {
+    if (!selectedBook) return;
+    setSummaryLoading(true);
+    try {
+      const chapterIndex = selectedBook.chapters.findIndex(c => c.id === chapter.id);
+      const prevContext = selectedBook.chapters
+        .slice(0, chapterIndex)
+        .map((c, i) => `Chapitre ${i + 1} : ${c.title}`)
+        .join(', ');
+
+      const res = await fetch('/api/chapters/summary', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(settings.geminiApiKey ? { 'x-gemini-api-key': settings.geminiApiKey } : {}),
+        },
+        body: JSON.stringify({
+          chapterText: chapter.text,
+          chapterTitle: chapter.title,
+          bookTitle: selectedBook.title,
+          previousChaptersContext: prevContext,
+          customApiKey: settings.geminiApiKey,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Erreur lors de la génération du résumé');
+      }
+
+      const data = await res.json();
+      const summaryText = data.summary;
+
+      const updatedBook: Book = {
+        ...selectedBook,
+        updatedAt: Date.now(),
+        chapters: selectedBook.chapters.map(c =>
+          c.id === chapter.id ? { ...c, summary: summaryText } : c
+        ),
+      };
+      await putBook(updatedBook);
+      setBooks(current => current.map(b => (b.id === updatedBook.id ? updatedBook : b)));
+      showToast('✨ Résumé IA généré avec succès !');
+    } catch (err: any) {
+      showToast(err?.message || 'Erreur lors du résumé IA', true);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }
+
+  async function playSummaryWithGemini(summaryText: string): Promise<void> {
+    if (!summaryText) return;
+    stopAllPlayback();
+    showToast('Synthèse vocale Gemini Flash pour le résumé...');
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(settings.geminiApiKey ? { 'x-gemini-api-key': settings.geminiApiKey } : {}),
+        },
+        body: JSON.stringify({
+          text: summaryText.replace(/###|---|\*\*|⚡|📖|🧠|👥|💡|🔗|🎯/g, ' ').slice(0, 15000),
+          voice: settings.cloudVoice || 'Kore',
+        }),
+      });
+      if (!res.ok) throw new Error('Échec synthèse résumé');
+      const data = await res.json();
+      const clean = data.audio.includes(',') ? data.audio.slice(data.audio.indexOf(',') + 1) : data.audio;
+      const binary = atob(clean);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      if (audioRef.current) {
+        audioRef.current.src = url;
+        audioRef.current.currentTime = 0;
+        void audioRef.current.play();
+        setAudioPlaying(true);
+        showToast('Lecture du résumé IA lancée');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erreur lecture résumé', true);
+    }
+  }
+
+  async function testApiKey(): Promise<void> {
+    const key = (settings.geminiApiKey || '').trim();
+    if (!key) {
+      showToast('Veuillez saisir votre clé API d’abord.', true);
+      return;
+    }
+    setKeyTestStatus('testing');
+    setKeyTestError(null);
+    try {
+      const res = await fetch('/api/validate-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: key }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setKeyTestStatus('valid');
+        localStorage.setItem('auralis_gemini_api_key', key);
+        localStorage.setItem('gemini_api_key', key);
+        showToast('✓ Clé API Gemini validée avec succès ! Connectée à Gemini Flash.');
+      } else {
+        setKeyTestStatus('invalid');
+        setKeyTestError(data.error || 'Clé non valide.');
+        showToast(data.error || 'Clé API Gemini invalide.', true);
+      }
+    } catch (err: any) {
+      setKeyTestStatus('invalid');
+      setKeyTestError(err?.message || 'Erreur de connexion');
+      showToast(err?.message || 'Erreur lors du test de la clé', true);
+    }
+  }
+
+  async function handleGithubPush(): Promise<void> {
+    const token = githubToken.trim();
+    if (!token) {
+      showToast('Veuillez saisir votre jeton GitHub (PAT).', true);
+      return;
+    }
+    setGithubSyncing(true);
+    setGithubSyncResult(null);
+    try {
+      localStorage.setItem('auralis_github_token', token);
+      const res = await fetch('/api/github/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token,
+          repoUrl: 'https://github.com/nathsrb/LivreVox.git',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setGithubSyncResult({ ok: true, message: data.message || 'Synchronisé avec succès !' });
+        showToast('✓ Code synchronisé sur GitHub (main) !');
+      } else {
+        setGithubSyncResult({ ok: false, message: data.error || 'Erreur lors de la synchronisation GitHub.' });
+        showToast(data.error || 'Erreur push GitHub', true);
+      }
+    } catch (err: any) {
+      const msg = err?.message || 'Erreur réseau lors de la synchronisation';
+      setGithubSyncResult({ ok: false, message: msg });
+      showToast(msg, true);
+    } finally {
+      setGithubSyncing(false);
+    }
+  }
+
+  function handleSkip(seconds: number): void {
+    if (playableAudioUrl && audioRef.current) {
+      const target = Math.max(0, Math.min(audioDuration, (audioRef.current.currentTime || 0) + seconds));
+      audioRef.current.currentTime = target;
+      setAudioCurrentTime(target);
+    } else if (speechState === 'playing') {
+      showToast(seconds > 0 ? '+15s (disponible sur l’audio généré)' : '-15s (disponible sur l’audio généré)');
+    }
+  }
+
+  function seekTo(target: number): void {
+    if (playableAudioUrl && audioRef.current) {
+      audioRef.current.currentTime = target;
+      setAudioCurrentTime(target);
+    }
+  }
+
+  function goToNextChapter(autoStart = false): void {
+    if (!selectedBook || !selectedChapter) return;
+    const currentIndex = selectedBook.chapters.findIndex(c => c.id === selectedChapter.id);
+    if (currentIndex < selectedBook.chapters.length - 1) {
+      const next = selectedBook.chapters[currentIndex + 1];
+      setChapterId(next.id);
+      setAudioCurrentTime(0);
+      if (autoStart) {
+        setTimeout(() => {
+          if (audioRef.current && (next.audioUrl || audioMap[next.id])) {
+            void audioRef.current.play().catch(() => undefined);
+            setAudioPlaying(true);
+          } else {
+            void generateCurrentAndPlay();
+          }
+        }, 280);
+      }
+    } else {
+      showToast('🎉 Livre terminé ! Félicitations pour votre écoute.');
+    }
+  }
+
+  function goToPrevChapter(): void {
+    if (!selectedBook || !selectedChapter) return;
+    const currentIndex = selectedBook.chapters.findIndex(c => c.id === selectedChapter.id);
+    if (currentIndex > 0) {
+      const prev = selectedBook.chapters[currentIndex - 1];
+      setChapterId(prev.id);
+      setAudioCurrentTime(0);
+    }
   }
 
   function toggleInstantSpeech(): void {
@@ -554,6 +1053,7 @@ export default function AudiobookApp() {
   }
 
   async function ensureVoiceReady(): Promise<boolean> {
+    if (settings.geminiApiKey?.trim() || localStorage.getItem('auralis_gemini_api_key')) return true;
     if (storedVoices.includes(settings.voiceId)) return true;
     setGeneration({
       active: true,
@@ -606,7 +1106,9 @@ export default function AudiobookApp() {
         settings.voiceId,
         (progress, label) =>
           setGeneration({ active: true, progress, label, mode }),
-        () => cancelGeneration.current
+        () => cancelGeneration.current,
+        settings.geminiApiKey,
+        settings.cloudVoice
       );
       const record: AudioRecord = {
         id: `${book.id}:${chapter.id}`,
@@ -733,6 +1235,7 @@ export default function AudiobookApp() {
 
   async function confirmDeleteBook(): Promise<void> {
     if (!deleteTarget) return;
+    stopAllPlayback();
     if (deleteTarget.cloudJobId) await deleteCloudJob(deleteTarget.cloudJobId).catch(() => undefined);
     await deleteBook(deleteTarget.id);
     const next = books.filter(book => book.id !== deleteTarget.id);
@@ -768,8 +1271,8 @@ export default function AudiobookApp() {
             <Headphones size={20} />
           </div>
           <div>
-            <strong>LivreVox</strong>
-            <small>PDF → audio local</small>
+            <strong>Auralis</strong>
+            <small>Livre audio IA & Résumés</small>
           </div>
         </div>
         <button className="lv-primary" onClick={() => fileRef.current?.click()}>
@@ -822,7 +1325,7 @@ export default function AudiobookApp() {
             <Headphones size={17} />
           </div>
           <div className="lv-topbar-title">
-            <strong>{selectedBook?.title ?? 'LivreVox'}</strong>
+            <strong>{selectedBook?.title ?? 'Auralis'}</strong>
             <span>
               {selectedBook
                 ? 'Bibliothèque locale'
@@ -830,6 +1333,42 @@ export default function AudiobookApp() {
             </span>
           </div>
           <div className="lv-top-actions">
+            {settings.geminiApiKey?.trim() ? (
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: '#4ade80',
+                  background: 'rgba(34, 197, 94, 0.12)',
+                  border: '1px solid rgba(34, 197, 94, 0.3)',
+                  padding: '4px 9px',
+                  borderRadius: '20px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontWeight: 500,
+                }}
+                title="Votre clé API Gemini personnelle est chargée et active"
+              >
+                <CheckCircle2 size={12} />
+                <span>Clé Gemini connectée</span>
+              </span>
+            ) : null}
+            <button
+              className="lv-icon-button"
+              title="Synchroniser avec GitHub"
+              onClick={() => setGithubModalOpen(true)}
+            >
+              <GitBranch size={17} />
+            </button>
+            <a
+              href="/api/download-zip"
+              download="Auralis-LivreVox-code.zip"
+              className="lv-icon-button"
+              title="Télécharger tout le code source (.zip)"
+              style={{ textDecoration: 'none' }}
+            >
+              <Download size={17} />
+            </a>
             <button
               className="lv-icon-button"
               title="Importer un PDF"
@@ -958,24 +1497,66 @@ export default function AudiobookApp() {
                 </button>
               </section>
 
+              {/* Bannière de reprise automatique */}
+              {resumeState && !audioPlaying && (
+                <div className="lv-resume-banner">
+                  <div className="lv-resume-info">
+                    <div className="lv-resume-icon">
+                      <Headphones size={20} />
+                    </div>
+                    <div className="lv-resume-text">
+                      <strong>Reprendre votre écoute : {resumeState.chapterTitle}</strong>
+                      <span>
+                        {resumeState.bookTitle} · {formatTime(resumeState.currentTime)} / {formatTime(resumeState.duration)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="lv-resume-actions">
+                    <button
+                      className="lv-primary"
+                      onClick={handleResume}
+                      style={{ width: 'auto', padding: '7px 14px', fontSize: '13px' }}
+                    >
+                      <Play size={14} fill="currentColor" /> Reprendre
+                    </button>
+                    <button
+                      className="lv-ghost"
+                      onClick={() => {
+                        setResumeState(null);
+                        localStorage.removeItem('auralis_resume_state');
+                      }}
+                      title="Ignorer"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <nav className="lv-tabs" aria-label="Sections du livre">
                 <button
                   className={`lv-tab ${tab === 'listen' ? 'active' : ''}`}
                   onClick={() => setTab('listen')}
                 >
-                  Écouter
+                  <Headphones size={15} /> Écouter
                 </button>
                 <button
                   className={`lv-tab ${tab === 'chapters' ? 'active' : ''}`}
                   onClick={() => setTab('chapters')}
                 >
-                  Chapitres
+                  <BookOpen size={15} /> Chapitres
+                </button>
+                <button
+                  className={`lv-tab ${tab === 'summary' ? 'active' : ''}`}
+                  onClick={() => setTab('summary')}
+                >
+                  <Brain size={15} /> Résumé IA
                 </button>
                 <button
                   className={`lv-tab ${tab === 'export' ? 'active' : ''}`}
                   onClick={() => setTab('export')}
                 >
-                  Générer & exporter
+                  <Sparkles size={15} /> Générer & exporter
                 </button>
               </nav>
 
@@ -1008,90 +1589,274 @@ export default function AudiobookApp() {
                         <div>
                           <h2>{selectedChapter.title}</h2>
                           <p>
-                            {selectedChapter.words} mots · environ{' '}
+                            {selectedChapter.words.toLocaleString('fr-FR')} mots · environ{' '}
                             {selectedChapter.estimatedMinutes} min
                           </p>
                         </div>
-                        <span className="lv-status-pill">
-                          {currentAudio
-                            ? 'WAV local prêt'
-                            : 'Lecture instantanée'}
-                        </span>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
+                            <Volume2 size={12} />
+                            {playableAudioUrl ? 'Audio HD généré' : 'Voix système directe'}
+                          </span>
+                          <button
+                            className="lv-icon-button"
+                            title="Mode lecteur immersif plein écran"
+                            onClick={() => setIsImmersiveOpen(true)}
+                          >
+                            <Maximize2 size={16} />
+                          </button>
+                        </div>
                       </div>
-                      <div className="lv-text">{selectedChapter.text}</div>
+                      <div className="lv-text">
+                        {paragraphs.map((para, idx) => (
+                          <p
+                            key={idx}
+                            className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                            onClick={() => {
+                              if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
+                                const targetSec = (idx / paragraphs.length) * audioDuration;
+                                seekTo(targetSec);
+                                if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                              }
+                            }}
+                          >
+                            {para}
+                          </p>
+                        ))}
+                      </div>
                     </article>
 
-                    <div className="lv-card lv-player">
-                      <div className="lv-player-main">
+                    {/* Lecteur Audio Intégré Haute Performance */}
+                    <div className="lv-player-card">
+                      <div className="lv-player-header">
+                        <div className="lv-player-track-info">
+                          <div className="lv-player-cover">
+                            {audioPlaying || speechState === 'playing' ? (
+                              <div className="lv-eq-bars">
+                                <span className="lv-eq-bar" />
+                                <span className="lv-eq-bar" />
+                                <span className="lv-eq-bar" />
+                                <span className="lv-eq-bar" />
+                              </div>
+                            ) : (
+                              <Headphones size={20} />
+                            )}
+                          </div>
+                          <div className="lv-player-titles">
+                            <strong>{selectedChapter.title}</strong>
+                            <small>{selectedBook.title}</small>
+                          </div>
+                        </div>
+
+                        <div className="lv-player-actions-cluster">
+                          <button
+                            className="lv-icon-button"
+                            title="Mode immersif plein écran"
+                            onClick={() => setIsImmersiveOpen(true)}
+                          >
+                            <Maximize2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Scrubber Timeline */}
+                      <div className="lv-scrubber-container">
+                        <span className="lv-time-display">
+                          {playableAudioUrl
+                            ? formatTime(audioCurrentTime)
+                            : speechProgress > 0
+                              ? `${speechProgress}%`
+                              : '0:00'}
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={playableAudioUrl ? (audioDuration || 1) : 100}
+                          step={playableAudioUrl ? 0.5 : 1}
+                          value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                          onChange={e => {
+                            if (playableAudioUrl) {
+                              seekTo(Number(e.target.value));
+                            }
+                          }}
+                          disabled={!playableAudioUrl}
+                          className="lv-scrubber-slider"
+                          aria-label="Position de lecture"
+                        />
+                        <span className="lv-time-display lv-time-right">
+                          {playableAudioUrl
+                            ? formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)
+                            : `~${selectedChapter.estimatedMinutes}m`}
+                        </span>
+                      </div>
+
+                      {/* Transport Controls Row */}
+                      <div className="lv-player-controls-row">
                         <button
-                          className="lv-round"
-                          aria-label={
-                            speechState === 'playing'
-                              ? 'Mettre en pause'
-                              : 'Lire avec la voix système'
-                          }
-                          onClick={toggleInstantSpeech}
+                          className="lv-ctrl-btn"
+                          title="Chapitre précédent"
+                          disabled={selectedBook.chapters.findIndex(c => c.id === selectedChapter.id) === 0}
+                          onClick={goToPrevChapter}
+                          aria-label="Chapitre précédent"
                         >
-                          {speechState === 'playing' ? (
-                            <Square size={17} />
+                          <SkipBack size={17} />
+                        </button>
+
+                        <button
+                          className="lv-ctrl-btn"
+                          title="Reculer de 15 secondes"
+                          onClick={() => handleSkip(-15)}
+                          aria-label="Reculer de 15 secondes"
+                        >
+                          <RotateCcw size={16} />
+                          <span className="lv-skip-label">15</span>
+                        </button>
+
+                        <button
+                          className="lv-ctrl-btn-play"
+                          title={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire l’audio'}
+                          onClick={togglePlayPause}
+                          aria-label={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire'}
+                        >
+                          {audioPlaying || speechState === 'playing' ? (
+                            <Pause size={24} fill="currentColor" />
                           ) : (
-                            <Play size={18} fill="currentColor" />
+                            <Play size={24} fill="currentColor" style={{ marginLeft: '2px' }} />
                           )}
                         </button>
+
                         <button
-                          className="lv-round subtle"
-                          aria-label="Arrêter"
-                          onClick={stopSpeech}
+                          className="lv-ctrl-btn"
+                          title="Avancer de 15 secondes"
+                          onClick={() => handleSkip(15)}
+                          aria-label="Avancer de 15 secondes"
                         >
-                          <CircleStop size={17} />
+                          <RotateCw size={16} />
+                          <span className="lv-skip-label">15</span>
+                        </button>
+
+                        <button
+                          className="lv-ctrl-btn"
+                          title="Chapitre suivant"
+                          disabled={
+                            selectedBook.chapters.findIndex(c => c.id === selectedChapter.id) ===
+                            selectedBook.chapters.length - 1
+                          }
+                          onClick={() => goToNextChapter(false)}
+                          aria-label="Chapitre suivant"
+                        >
+                          <SkipForward size={17} />
                         </button>
                       </div>
-                      <div className="lv-progress">
-                        <div className="lv-progress-track">
-                          <div
-                            className="lv-progress-fill"
-                            style={{ width: `${speechProgress}%` }}
+
+                      {/* Footer Controls: Vitesse, Minuterie, Mode */}
+                      <div className="lv-player-footer-tools">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                          <select
+                            aria-label="Vitesse de lecture"
+                            className="lv-rate"
+                            value={settings.rate}
+                            onChange={event => updateRate(Number(event.target.value))}
+                          >
+                            {SPEEDS.map(rate => (
+                              <option key={rate} value={rate}>
+                                {rate}×
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            className="lv-icon-button"
+                            style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
+                            onClick={() => setTab('summary')}
+                            title="Ouvrir le Résumé IA de ce chapitre"
+                          >
+                            <Brain size={13} />
+                            <span>Résumé IA</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            className="lv-icon-button"
+                            style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
+                            onClick={toggleInstantSpeech}
+                            title="Synthèse vocale système instantanée (sans génération)"
+                          >
+                            <Volume2 size={13} />
+                            <span>{speechState === 'playing' ? 'Pause directe' : 'Voix directe'}</span>
+                          </button>
+
+                          <select
+                            aria-label="Minuterie de veille"
+                            className="lv-rate"
+                            value={sleepTimerMinutes ?? ''}
+                            onChange={e => {
+                              const val = e.target.value ? Number(e.target.value) : null;
+                              setSleepTimerMinutes(val);
+                              if (val) {
+                                showToast(`Minuterie : arrêt automatique dans ${val} min.`);
+                              } else {
+                                showToast('Minuterie de veille désactivée.');
+                              }
+                            }}
+                          >
+                            <option value="">Veille : off</option>
+                            <option value="15">Arrêt 15 min</option>
+                            <option value="30">Arrêt 30 min</option>
+                            <option value="45">Arrêt 45 min</option>
+                            <option value="60">Arrêt 60 min</option>
+                          </select>
+                        </div>
+
+                        {sleepRemainingSeconds !== null && (
+                          <span className="lv-player-mode-tag" style={{ color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}>
+                            <Moon size={12} /> {formatTime(sleepRemainingSeconds)}
+                          </span>
+                        )}
+
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#94a3b8', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={autoPlayNext}
+                            onChange={e => setAutoPlayNext(e.target.checked)}
                           />
-                        </div>
-                        <div className="lv-player-label">
-                          Voix système ·{' '}
-                          {speechState === 'idle'
-                            ? 'prête'
-                            : speechState === 'paused'
-                              ? 'en pause'
-                              : 'lecture en cours'}
-                        </div>
+                          Enchaîner auto
+                        </label>
                       </div>
-                      <select
-                        aria-label="Vitesse de lecture"
-                        className="lv-rate"
-                        value={settings.rate}
-                        onChange={event =>
-                          setSettings(current => ({
-                            ...current,
-                            rate: Number(event.target.value),
-                          }))
-                        }
-                      >
-                        {[0.8, 1, 1.15, 1.3, 1.5, 1.75, 2].map(rate => (
-                          <option key={rate} value={rate}>
-                            {rate}×
-                          </option>
-                        ))}
-                      </select>
-                      {(currentAudio || selectedChapter.audioUrl) && (
-                        <audio
-                          ref={audioRef}
-                          className="lv-audio"
-                          controls
-                          src={playableAudioUrl}
-                          onPlay={() => {
-                            if (audioRef.current)
-                              audioRef.current.playbackRate = settings.rate;
-                          }}
-                        />
-                      )}
                     </div>
+
+                    <audio
+                      ref={audioRef}
+                      src={playableAudioUrl || undefined}
+                      style={{ display: 'none' }}
+                      onTimeUpdate={() => {
+                        if (audioRef.current) {
+                          setAudioCurrentTime(audioRef.current.currentTime);
+                          setAudioDuration(audioRef.current.duration || 0);
+                        }
+                      }}
+                      onLoadedMetadata={() => {
+                        if (audioRef.current) {
+                          setAudioDuration(audioRef.current.duration || 0);
+                          audioRef.current.playbackRate = settings.rate;
+                        }
+                      }}
+                      onPlay={() => {
+                        setAudioPlaying(true);
+                        window.speechSynthesis?.cancel();
+                        setSpeechState('idle');
+                      }}
+                      onPause={() => {
+                        setAudioPlaying(false);
+                      }}
+                      onEnded={() => {
+                        setAudioPlaying(false);
+                        if (autoPlayNext) {
+                          goToNextChapter(true);
+                        }
+                      }}
+                    />
                   </div>
                 </section>
               )}
@@ -1127,10 +1892,28 @@ export default function AudiobookApp() {
                         >
                           <Pencil size={13} /> Renommer
                         </button>
+                        <button
+                          className="lv-ghost"
+                          onClick={() => {
+                            setChapterId(chapter.id);
+                            setTab('summary');
+                          }}
+                          title="Consulter le résumé IA de cette section"
+                        >
+                          <Brain size={13} /> Résumé IA
+                        </button>
+                        <button
+                          className="lv-ghost lv-danger"
+                          onClick={() => setDeleteChapterTarget(chapter)}
+                          title="Supprimer cette section/chapitre du livre"
+                        >
+                          <Trash2 size={13} /> Supprimer
+                        </button>
                         {audioMap[chapter.id] && !chapter.audioUrl && (
                           <button
                             className="lv-ghost lv-danger"
                             onClick={() => void removeGeneratedChapter(chapter)}
+                            title="Supprimer uniquement l’audio généré"
                           >
                             <Trash2 size={13} /> Audio
                           </button>
@@ -1138,6 +1921,91 @@ export default function AudiobookApp() {
                       </div>
                     </div>
                   ))}
+                </section>
+              )}
+
+              {tab === 'summary' && selectedChapter && (
+                <section className="lv-summary-panel">
+                  <div className="lv-summary-hero">
+                    <div className="lv-summary-hero-copy">
+                      <h2>
+                        <Brain size={20} /> Résumé & Mémorisation IA — {selectedChapter.title}
+                      </h2>
+                      <p>
+                        Synthèse intelligente propulsée par Gemini Flash : points clés, concepts, anti-spoiler et format optimisé pour l'écoute.
+                      </p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      {selectedChapter.summary && (
+                        <button
+                          className="lv-secondary"
+                          onClick={() => void playSummaryWithGemini(selectedChapter.summary!)}
+                          disabled={summaryLoading}
+                          title="Écouter la synthèse vocale Gemini Flash de ce résumé"
+                        >
+                          <Volume2 size={14} /> Écouter le résumé (Gemini Flash)
+                        </button>
+                      )}
+                      <button
+                        className="lv-primary"
+                        style={{ width: 'auto' }}
+                        onClick={() => void generateChapterSummary(selectedChapter)}
+                        disabled={summaryLoading}
+                      >
+                        {summaryLoading ? (
+                          <>
+                            <RefreshCw size={14} className="animate-spin" /> Analyse IA en cours...
+                          </>
+                        ) : selectedChapter.summary ? (
+                          <>
+                            <RotateCcw size={14} /> Régénérer le résumé
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles size={14} /> Générer le résumé de ce chapitre
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Sélecteur rapide de chapitre pour le résumé */}
+                  <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
+                    {selectedBook.chapters.map((ch, idx) => (
+                      <button
+                        key={ch.id}
+                        className={`lv-tab ${ch.id === selectedChapter.id ? 'active' : ''}`}
+                        style={{ padding: '6px 12px', fontSize: '12px', whiteSpace: 'nowrap' }}
+                        onClick={() => setChapterId(ch.id)}
+                      >
+                        Ch. {idx + 1} : {ch.title.length > 25 ? `${ch.title.slice(0, 25)}…` : ch.title} {ch.summary ? '✓' : ''}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="lv-summary-content">
+                    {selectedChapter.summary ? (
+                      renderFormattedSummary(selectedChapter.summary)
+                    ) : (
+                      <div style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
+                        <Brain size={48} style={{ margin: '0 auto 16px', opacity: 0.5, color: '#a78bfa' }} />
+                        <h3 style={{ color: '#f8fafc', fontSize: '18px', marginBottom: '8px' }}>
+                          Aucun résumé pour « {selectedChapter.title} » pour le moment
+                        </h3>
+                        <p style={{ maxWidth: '520px', margin: '0 auto 20px', fontSize: '13px', lineHeight: 1.6 }}>
+                          Cliquez sur « Générer le résumé de ce chapitre » pour obtenir une analyse structurée en 6 sections : ⚡ Le chapitre en 30 secondes, 📖 Résumé détaillé, 🧠 À retenir, 👥 Personnages ou 💡 Concepts importants, 🔗 Pourquoi ce chapitre est important, et 🎯 Si tu ne devais retenir qu’une seule chose.
+                        </p>
+                        <button
+                          className="lv-primary"
+                          style={{ width: 'auto', margin: '0 auto' }}
+                          onClick={() => void generateChapterSummary(selectedChapter)}
+                          disabled={summaryLoading}
+                        >
+                          <Sparkles size={15} /> {summaryLoading ? 'Analyse Gemini Flash...' : 'Générer avec Gemini Flash'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </section>
               )}
 
@@ -1268,8 +2136,30 @@ export default function AudiobookApp() {
                       </div>
                     ))}
                   </div>
+
+                  {/* Export du Code Source Complet */}
+                  <div className="lv-card" style={{ marginTop: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                    <div>
+                      <strong style={{ fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Download size={16} style={{ color: '#818cf8' }} /> Code Source Complet du Projet (.zip)
+                      </strong>
+                      <span style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginTop: '3px' }}>
+                        Téléchargez l'archive complète du projet (40 fichiers : React/Vite, Serveur Express, TTS, CI GitHub, styles).
+                      </span>
+                    </div>
+                    <a
+                      href="/api/download-zip"
+                      download="Auralis-LivreVox-code.zip"
+                      className="lv-primary"
+                      style={{ width: 'auto', textDecoration: 'none', padding: '10px 18px', fontSize: '13px' }}
+                    >
+                      <Download size={15} /> Télécharger le ZIP (20 Mo)
+                    </a>
+                  </div>
                 </section>
               )}
+              {/* Espacement de sécurité pour ne jamais masquer les boutons ou le texte */}
+              <div style={{ height: '80px', minHeight: '80px' }} />
             </>
           )}
         </div>
@@ -1314,9 +2204,34 @@ export default function AudiobookApp() {
                 <X size={16} />
               </button>
             </div>
-            <p>Les réglages restent enregistrés dans ton navigateur.</p>
+            <p>Personnalise les voix de lecture selon tes préférences.</p>
+
             <div className="lv-field">
-              <label htmlFor="neural-voice">Voix neuronale locale</label>
+              <label htmlFor="cloud-voice">Voix Cloud Gemini (Narration IA réaliste)</label>
+              <select
+                id="cloud-voice"
+                className="lv-select"
+                value={settings.cloudVoice || 'Kore'}
+                onChange={event =>
+                  setSettings(current => ({
+                    ...current,
+                    cloudVoice: event.target.value,
+                  }))
+                }
+              >
+                {CLOUD_VOICES.map(voice => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.label}
+                  </option>
+                ))}
+              </select>
+              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
+                Voix utilisées lors de la génération de fichiers audio haute fidélité via l’IA.
+              </p>
+            </div>
+
+            <div className="lv-field">
+              <label htmlFor="neural-voice">Voix locale Piper (Secours & Hors-ligne)</label>
               <select
                 id="neural-voice"
                 className="lv-select"
@@ -1343,34 +2258,55 @@ export default function AudiobookApp() {
                   </option>
                 ))}
               </select>
-              <p>
+              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
                 {storedVoices.includes(settings.voiceId)
-                  ? 'Cette voix est déjà stockée localement.'
-                  : 'Elle sera téléchargée automatiquement lors de la première génération.'}
+                  ? '✓ Cette voix locale est enregistrée dans votre navigateur.'
+                  : 'Téléchargée automatiquement lors de la première génération locale.'}
               </p>
             </div>
+
             <div className="lv-field">
               <label htmlFor="system-voice">
-                Voix système pour l’écoute instantanée
+                Voix système (Pour le bouton « Écouter » instantané)
               </label>
-              <select
-                id="system-voice"
-                className="lv-select"
-                value={settings.systemVoiceUri}
-                onChange={event =>
-                  setSettings(current => ({
-                    ...current,
-                    systemVoiceUri: event.target.value,
-                  }))
-                }
-              >
-                <option value="">Automatique</option>
-                {frenchSystemVoices.map(voice => (
-                  <option key={voice.voiceURI} value={voice.voiceURI}>
-                    {voice.name} · {voice.lang}
-                  </option>
-                ))}
-              </select>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <select
+                  id="system-voice"
+                  className="lv-select"
+                  style={{ flex: 1 }}
+                  value={settings.systemVoiceUri}
+                  onChange={event =>
+                    setSettings(current => ({
+                      ...current,
+                      systemVoiceUri: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Automatique (meilleure voix française)</option>
+                  {frenchSystemVoices.map(voice => (
+                    <option key={voice.voiceURI} value={voice.voiceURI}>
+                      {voice.name} ({voice.lang})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="lv-secondary"
+                  style={{ width: 'auto', whiteSpace: 'nowrap' }}
+                  onClick={() => {
+                    if (!('speechSynthesis' in window)) return;
+                    window.speechSynthesis.cancel();
+                    const utt = new SpeechSynthesisUtterance('Bonjour ! Ceci est un aperçu de la voix pour votre livre audio.');
+                    utt.rate = settings.rate;
+                    const v = systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ||
+                              systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
+                    if (v) utt.voice = v;
+                    window.speechSynthesis.speak(utt);
+                  }}
+                >
+                  Tester
+                </button>
+              </div>
             </div>
             <div className="lv-field">
               <label htmlFor="ocr-lang">Langue OCR</label>
@@ -1407,6 +2343,67 @@ export default function AudiobookApp() {
                   presque aucun texte sur une page.
                 </span>
               </label>
+            </div>
+            <div className="lv-field">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label htmlFor="gemini-key">
+                  Clé API Google Gemini (Prioritaire · Illimité)
+                </label>
+                {settings.geminiApiKey?.trim() ? (
+                  <span style={{ fontSize: '11px', color: '#4ade80', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
+                    <CheckCircle2 size={12} /> Active & Enregistrée
+                  </span>
+                ) : null}
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  id="gemini-key"
+                  type="password"
+                  className="lv-input"
+                  style={{ flex: 1 }}
+                  placeholder="AIzaSy... (votre clé API Gemini personnelle)"
+                  value={settings.geminiApiKey || ''}
+                  onChange={event => {
+                    const val = event.target.value.trim();
+                    setSettings(current => ({
+                      ...current,
+                      geminiApiKey: val,
+                    }));
+                    if (val) {
+                      localStorage.setItem('auralis_gemini_api_key', val);
+                      localStorage.setItem('gemini_api_key', val);
+                    } else {
+                      localStorage.removeItem('auralis_gemini_api_key');
+                      localStorage.removeItem('gemini_api_key');
+                    }
+                    setKeyTestStatus('idle');
+                    setKeyTestError(null);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="lv-secondary"
+                  style={{ width: 'auto', whiteSpace: 'nowrap' }}
+                  onClick={() => void testApiKey()}
+                  disabled={!settings.geminiApiKey?.trim() || keyTestStatus === 'testing'}
+                >
+                  {keyTestStatus === 'testing' ? 'Test...' : 'Tester'}
+                </button>
+              </div>
+
+              {keyTestStatus === 'valid' && (
+                <p style={{ fontSize: '0.8rem', color: '#4ade80', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <CheckCircle2 size={13} /> Clé valide : connectée à Gemini Flash pour toute la narration et les résumés !
+                </p>
+              )}
+              {keyTestStatus === 'invalid' && (
+                <p style={{ fontSize: '0.8rem', color: '#f87171', marginTop: 4 }}>
+                  ✕ {keyTestError || 'Clé API invalide. Vérifiez vos identifiants Google AI Studio.'}
+                </p>
+              )}
+              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
+                Votre clé personnelle est prioritaire, conservée sur votre appareil et utilisée directement sans bascule locale.
+              </p>
             </div>
             <div className="lv-modal-actions">
               {storedVoices.includes(settings.voiceId) && (
@@ -1510,7 +2507,7 @@ export default function AudiobookApp() {
           <div className="lv-card lv-modal">
             <h2>Supprimer ce livre ?</h2>
             <p>
-              « {deleteTarget.title} » et ses fichiers audio seront supprimés {deleteTarget.cloudJobId ? 'de cet appareil et du stockage cloud LivreVox' : 'du stockage local de cet appareil'}.
+              « {deleteTarget.title} » et ses fichiers audio seront supprimés {deleteTarget.cloudJobId ? 'de cet appareil et du stockage cloud Auralis' : 'du stockage local de cet appareil'}.
             </p>
             <div className="lv-modal-actions">
               <button
@@ -1525,6 +2522,320 @@ export default function AudiobookApp() {
               >
                 <Trash2 size={13} /> Supprimer définitivement
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteChapterTarget && (
+        <div className="lv-modal-wrap">
+          <div className="lv-card lv-modal">
+            <h2>Supprimer cette section / chapitre ?</h2>
+            <p>
+              Êtes-vous sûr de vouloir supprimer définitivement la section « {deleteChapterTarget.title} » de « {selectedBook?.title} » ?
+            </p>
+            <div className="lv-modal-actions">
+              <button
+                className="lv-ghost"
+                onClick={() => setDeleteChapterTarget(null)}
+              >
+                Annuler
+              </button>
+              <button
+                className="lv-secondary lv-danger"
+                onClick={() => void confirmDeleteChapter()}
+              >
+                <Trash2 size={13} /> Supprimer la section
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modale de synchronisation GitHub */}
+      {githubModalOpen && (
+        <div
+          className="lv-modal-wrap"
+          onMouseDown={e => {
+            if (e.target === e.currentTarget) setGithubModalOpen(false);
+          }}
+        >
+          <div className="lv-card lv-modal" style={{ maxWidth: '520px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <GitBranch size={20} style={{ color: '#a78bfa' }} />
+                <h2>Synchronisation GitHub</h2>
+              </div>
+              <button className="lv-icon-button" onClick={() => setGithubModalOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <p style={{ marginTop: '8px', fontSize: '13px', color: '#94a3b8' }}>
+              Pousse automatiquement l'intégralité du code et le commit en cours vers votre dépôt distant GitHub sur la branche <strong>main</strong>.
+            </p>
+
+            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid #1e293b', borderRadius: '10px', padding: '12px', marginTop: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' }}>
+                <span style={{ color: '#94a3b8' }}>Dépôt cible :</span>
+                <a
+                  href="https://github.com/nathsrb/LivreVox"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: '#818cf8', display: 'inline-flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}
+                >
+                  nathsrb/LivreVox <ExternalLink size={11} />
+                </a>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                <span style={{ color: '#94a3b8' }}>Branche :</span>
+                <span style={{ color: '#4ade80', fontWeight: 600 }}>main (commit prêt)</span>
+              </div>
+            </div>
+
+            <div className="lv-field" style={{ marginTop: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label htmlFor="gh-token" style={{ fontSize: '13px', fontWeight: 600 }}>
+                  Personal Access Token GitHub (PAT)
+                </label>
+                <a
+                  href="https://github.com/settings/tokens/new?scopes=repo&description=Auralis-LivreVox"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ fontSize: '11px', color: '#a78bfa', display: 'inline-flex', alignItems: 'center', gap: '3px', textDecoration: 'none' }}
+                >
+                  Créer un jeton (scope repo) <ExternalLink size={10} />
+                </a>
+              </div>
+              <input
+                id="gh-token"
+                type="password"
+                className="lv-input"
+                placeholder="ghp_... ou github_pat_..."
+                value={githubToken}
+                onChange={e => setGithubToken(e.target.value)}
+                autoFocus
+              />
+              <p style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                Requis par GitHub pour autoriser l'écriture sur votre compte <strong>nathsrb</strong>. Ce jeton est stocké uniquement localement dans votre navigateur.
+              </p>
+            </div>
+
+            {githubSyncResult && (
+              <div
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  fontSize: '12px',
+                  marginTop: '10px',
+                  background: githubSyncResult.ok ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                  border: `1px solid ${githubSyncResult.ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                  color: githubSyncResult.ok ? '#4ade80' : '#f87171',
+                }}
+              >
+                {githubSyncResult.message}
+              </div>
+            )}
+
+            <div style={{ marginTop: '16px', padding: '12px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <strong style={{ fontSize: '13px', color: '#93c5fd', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Download size={14} /> Alternative : Télécharger le code (.zip)
+                </strong>
+                <span style={{ fontSize: '11px', color: '#94a3b8', display: 'block', marginTop: '2px' }}>
+                  Archive autonome complète (40 fichiers source prêts à être extraits).
+                </span>
+              </div>
+              <a
+                href="/api/download-zip"
+                download="Auralis-LivreVox-code.zip"
+                className="lv-secondary"
+                style={{ textDecoration: 'none', fontSize: '12px', padding: '6px 12px', whiteSpace: 'nowrap' }}
+              >
+                Télécharger .zip
+              </a>
+            </div>
+
+            <div className="lv-modal-actions" style={{ marginTop: '18px' }}>
+              <button className="lv-ghost" onClick={() => setGithubModalOpen(false)}>
+                Fermer
+              </button>
+              <button
+                className="lv-primary"
+                style={{ width: 'auto' }}
+                disabled={githubSyncing || !githubToken.trim()}
+                onClick={() => void handleGithubPush()}
+              >
+                {githubSyncing ? (
+                  <>
+                    <RefreshCw size={14} className="lv-spin" /> Synchronisation en cours...
+                  </>
+                ) : (
+                  <>
+                    <GitBranch size={14} /> Pousser vers GitHub (main)
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Barre de lecture fixe en bas d'écran (Sticky Docked Player) uniquement hors onglet lecteur */}
+      {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying || speechState === 'playing') && !dockedDismissed && (
+        <div className="lv-docked-player">
+          <div className="lv-docked-left">
+            <div className="lv-player-cover" style={{ width: '38px', height: '38px', borderRadius: '10px' }}>
+              {audioPlaying || speechState === 'playing' ? (
+                <div className="lv-eq-bars" style={{ height: '12px' }}>
+                  <span className="lv-eq-bar" />
+                  <span className="lv-eq-bar" />
+                  <span className="lv-eq-bar" />
+                </div>
+              ) : (
+                <Headphones size={18} />
+              )}
+            </div>
+            <div className="lv-player-titles">
+              <strong style={{ fontSize: '13px' }}>{selectedChapter.title}</strong>
+              <small>{selectedBook.title}</small>
+            </div>
+          </div>
+
+          <div className="lv-docked-center">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={goToPrevChapter} title="Chapitre précédent">
+                <SkipBack size={14} />
+              </button>
+              <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(-15)} title="-15s">
+                <RotateCcw size={13} />
+              </button>
+              <button className="lv-ctrl-btn-play" style={{ width: '40px', height: '40px' }} onClick={togglePlayPause} title={audioPlaying || speechState === 'playing' ? 'Pause' : 'Lecture'}>
+                {audioPlaying || speechState === 'playing' ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
+              </button>
+              <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(15)} title="+15s">
+                <RotateCw size={13} />
+              </button>
+              <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => goToNextChapter(false)} title="Chapitre suivant">
+                <SkipForward size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className="lv-docked-right">
+            <span className="lv-time-display" style={{ fontSize: '11px' }}>
+              {playableAudioUrl ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)}` : `${speechProgress}%`}
+            </span>
+            <button className="lv-icon-button" title="Ouvrir le lecteur complet" onClick={() => setTab('listen')}>
+              <Headphones size={15} />
+            </button>
+            <button className="lv-icon-button" title="Agrandir en mode plein écran immersif" onClick={() => setIsImmersiveOpen(true)}>
+              <Maximize2 size={15} />
+            </button>
+            <button className="lv-icon-button" title="Masquer la barre d’écoute" onClick={() => setDockedDismissed(true)}>
+              <X size={15} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Lecteur Plein Écran Immersif (Mode Podcast / Salon) */}
+      {isImmersiveOpen && selectedBook && selectedChapter && (
+        <div className="lv-immersive-overlay">
+          <div className="lv-immersive-topbar">
+            <button className="lv-secondary" onClick={() => setIsImmersiveOpen(false)}>
+              <Minimize2 size={16} /> Fermer
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
+                <Volume2 size={13} /> {playableAudioUrl ? 'Audio HD' : 'Voix système directe'}
+              </span>
+              {sleepRemainingSeconds !== null && (
+                <span className="lv-player-mode-tag" style={{ color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}>
+                  <Moon size={12} /> {formatTime(sleepRemainingSeconds)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="lv-immersive-body">
+            <div className="lv-immersive-artwork">
+              <div className="lv-immersive-artwork-glow" />
+              {audioPlaying || speechState === 'playing' ? (
+                <div className="lv-eq-bars" style={{ height: '40px', gap: '8px' }}>
+                  <span className="lv-eq-bar" style={{ width: '6px' }} />
+                  <span className="lv-eq-bar" style={{ width: '6px' }} />
+                  <span className="lv-eq-bar" style={{ width: '6px' }} />
+                  <span className="lv-eq-bar" style={{ width: '6px' }} />
+                  <span className="lv-eq-bar" style={{ width: '6px' }} />
+                </div>
+              ) : (
+                <Headphones size={72} />
+              )}
+            </div>
+
+            <div className="lv-immersive-meta">
+              <h2>{selectedChapter.title}</h2>
+              <p>{selectedBook.title} · {selectedChapter.words.toLocaleString('fr-FR')} mots</p>
+            </div>
+
+            <div className="lv-immersive-controls">
+              <div className="lv-scrubber-container">
+                <span className="lv-time-display">{playableAudioUrl ? formatTime(audioCurrentTime) : `${speechProgress}%`}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={playableAudioUrl ? (audioDuration || 1) : 100}
+                  step={playableAudioUrl ? 0.5 : 1}
+                  value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                  onChange={e => {
+                    if (playableAudioUrl) seekTo(Number(e.target.value));
+                  }}
+                  disabled={!playableAudioUrl}
+                  className="lv-scrubber-slider"
+                />
+                <span className="lv-time-display lv-time-right">
+                  {playableAudioUrl ? formatTime(audioDuration || selectedChapter.estimatedMinutes * 60) : `~${selectedChapter.estimatedMinutes}m`}
+                </span>
+              </div>
+
+              <div className="lv-player-controls-row" style={{ gap: '18px' }}>
+                <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={goToPrevChapter} title="Précédent">
+                  <SkipBack size={20} />
+                </button>
+                <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={() => handleSkip(-15)} title="-15s">
+                  <RotateCcw size={18} />
+                  <span className="lv-skip-label">15</span>
+                </button>
+                <button className="lv-ctrl-btn-play" style={{ width: '68px', height: '68px' }} onClick={togglePlayPause}>
+                  {audioPlaying || speechState === 'playing' ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: '3px' }} />}
+                </button>
+                <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={() => handleSkip(15)} title="+15s">
+                  <RotateCw size={18} />
+                  <span className="lv-skip-label">15</span>
+                </button>
+                <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={() => goToNextChapter(false)} title="Suivant">
+                  <SkipForward size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="lv-immersive-reader">
+              {paragraphs.map((para, idx) => (
+                <p
+                  key={idx}
+                  className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                  onClick={() => {
+                    if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
+                      const targetSec = (idx / paragraphs.length) * audioDuration;
+                      seekTo(targetSec);
+                      if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                    }
+                  }}
+                >
+                  {para}
+                </p>
+              ))}
             </div>
           </div>
         </div>

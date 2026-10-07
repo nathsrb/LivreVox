@@ -20,7 +20,7 @@ class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[LivreVox ErrorBoundary caught]:', error, errorInfo);
+    console.error('[Auralis ErrorBoundary caught]:', error, errorInfo);
   }
 
   public render() {

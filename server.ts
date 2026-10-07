@@ -167,9 +167,10 @@ function concatenateWavBuffers(buffers: Buffer[]): Buffer {
 }
 
 /**
- * Splits text into paragraphs suitable for TTS narration (1500-2500 chars per segment)
+ * Splits text into paragraphs suitable for TTS narration (up to 7500 chars per segment)
+ * This avoids dividing normal chapters into too many chunks and hitting Gemini rate limits.
  */
-function splitTextForTts(text: string, maxLen = 2200): string[] {
+function splitTextForTts(text: string, maxLen = 7500): string[] {
   const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
   const chunks: string[] = [];
   let current = '';
@@ -203,60 +204,105 @@ function splitTextForTts(text: string, maxLen = 2200): string[] {
 }
 
 /**
- * Synthesizes audio using Gemini 3.8 Flash Lite TTS (gemini-3.8-flash-lite-tts).
- * Parallelizes chunks with concurrency of 3 for fast throughput.
+ * Synthesizes audio using Gemini Flash TTS.
+ * Uses gemini-3.8-flash-lite-tts (primary high-throughput TTS model).
+ * Processes segments with automated retry and backoff on 429/rate limits.
  */
 async function synthesizeSpeech(text: string, voiceName = 'Kore', customKey?: string): Promise<Buffer> {
-  const ai = getAi(customKey);
+  const apiKey = (customKey || process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('Aucune clé API Gemini fournie. Veuillez renseigner votre clé API dans les Réglages.');
+  }
+
+  // Memorize key for this session if process.env.GEMINI_API_KEY was not set
+  if (!process.env.GEMINI_API_KEY && customKey) {
+    process.env.GEMINI_API_KEY = customKey.trim();
+  }
+
+  const ai = getAi(apiKey);
   const segments = splitTextForTts(text).filter(s => s.trim().length > 0);
   if (!segments.length) {
     segments.push(text.trim() || 'Chapitre sans texte.');
   }
 
-  const BATCH_SIZE = 3;
-  const wavBuffers: Buffer[] = new Array(segments.length);
+  const wavBuffers: Buffer[] = [];
+  const candidateModels = ['gemini-3.8-flash-lite-tts'];
 
-  for (let i = 0; i < segments.length; i += BATCH_SIZE) {
-    const chunkBatch = segments.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(
-      chunkBatch.map(async (segment) => {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash-lite-tts',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: segment,
-                  speechMetadata: {
-                    style: 'Narration de livre audio naturelle, fluide, chaleureuse et captivante en français.',
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    let audioData: string | null = null;
+    let lastErr: any = null;
+
+    for (const model of candidateModels) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          if (attempt > 0) {
+            const backoffMs = 2500 * Math.pow(2, attempt - 1);
+            console.log(`[Gemini TTS] Attente ${backoffMs}ms avant tentative ${attempt + 1}/4...`);
+            await new Promise(r => setTimeout(r, backoffMs));
+          }
+          const response = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: segment,
                   },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' },
                 },
-              ],
-            },
-          ],
-          config: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' },
               },
             },
-          },
-        });
+          });
 
-        const candidate = response.candidates?.[0];
-        const audioPart = candidate?.content?.parts?.find(p => p.inlineData && p.inlineData.data);
-        if (!audioPart?.inlineData?.data) {
-          throw new Error('Gemini TTS n’a renvoyé aucun audio pour ce segment.');
+          const candidate = response.candidates?.[0];
+          const audioPart = candidate?.content?.parts?.find(p => p.inlineData && p.inlineData.data);
+          if (audioPart?.inlineData?.data) {
+            audioData = audioPart.inlineData.data;
+            break;
+          }
+        } catch (err: any) {
+          lastErr = err;
+          const isRateLimit =
+            err?.message?.includes('429') ||
+            err?.message?.includes('RESOURCE_EXHAUSTED') ||
+            err?.status === 429;
+          if (isRateLimit && attempt < 3) {
+            console.warn(`[Gemini TTS] 429 débit atteint sur ${model}, pause exponentielle et réessai (${attempt + 1}/4)...`);
+            continue;
+          }
+          break;
         }
+      }
+      if (audioData) break;
+    }
 
-        return Buffer.from(audioPart.inlineData.data, 'base64');
-      })
-    );
+    if (!audioData) {
+      console.error(`[Gemini TTS] Erreur finale pour le segment ${i + 1}/${segments.length}:`, lastErr);
+      const isQuota =
+        lastErr?.message?.includes('429') ||
+        lastErr?.message?.includes('RESOURCE_EXHAUSTED') ||
+        lastErr?.status === 429;
+      if (isQuota) {
+        throw new Error('Débit temporaire Gemini atteint (429). Veuillez patienter quelques secondes avant de relancer.');
+      }
+      throw new Error(
+        lastErr?.message || `Échec de la synthèse vocale Gemini Flash pour le segment ${i + 1}.`
+      );
+    }
 
-    for (let j = 0; j < results.length; j++) {
-      wavBuffers[i + j] = results[j];
+    wavBuffers.push(Buffer.from(audioData, 'base64'));
+    if (i < segments.length - 1) {
+      // Throttle politely between segments to stay under RPM quotas
+      await new Promise(r => setTimeout(r, 1200));
     }
   }
 
@@ -347,13 +393,13 @@ async function startServer() {
   });
 
   // Capabilities API
-  app.get('/api/cloud/capabilities', (_req: Request, res: Response) => {
-    const hasKey = Boolean(process.env.GEMINI_API_KEY);
+  app.get('/api/cloud/capabilities', (req: Request, res: Response) => {
+    const hasKey = Boolean(process.env.GEMINI_API_KEY || req.headers['x-gemini-api-key']);
     res.json({
       cloud: true,
       mode: '100% Cloud Gemini Flash',
       ttsConfigured: hasKey,
-      ttsProvider: 'gemini-3.8-flash-lite-tts',
+      ttsProvider: 'gemini-3.8-flash-tts',
       textModel: 'gemini-3.8-flash',
       chunkUpload: true,
       ocr: true,
@@ -373,7 +419,7 @@ async function startServer() {
       ok: true,
       provider: process.env.GEMINI_API_KEY ? 'gemini' : 'local-fallback',
       ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      model: process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-lite-tts',
+      model: process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts',
     });
   });
 
@@ -397,7 +443,7 @@ async function startServer() {
       }
 
       const voice = body.voice || process.env.GEMINI_TTS_VOICE || 'Kore';
-      const model = body.model || process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-lite-tts';
+      const model = body.model || process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
       const wavBuffer = await synthesizeSpeech(text, voice, customKey);
 
       res.json({
@@ -415,10 +461,261 @@ async function startServer() {
         err?.status === 429;
       res.status(isQuota ? 429 : 500).json({
         error: isQuota
-          ? 'Quota Gemini Free Tier atteint. Bascule automatique sur la synthèse vocale locale.'
-          : err?.message || 'Erreur synthèse vocale Gemini.',
+          ? 'Limite temporaire de débit Gemini atteinte. Veuillez patienter quelques secondes.'
+          : err?.message || 'Erreur synthèse vocale Gemini Flash.',
         isQuota,
       });
+    }
+  });
+
+  // Test and validate custom Gemini API key
+  app.post('/api/validate-key', async (req: Request, res: Response) => {
+    try {
+      const key = (req.body?.apiKey || (req.headers['x-gemini-api-key'] as string) || '').trim();
+      if (!key) {
+        return res.status(400).json({ ok: false, error: 'Veuillez saisir votre clé API.' });
+      }
+      const testAi = getAi(key);
+      const testResp = await testAi.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: 'Ping',
+      });
+      if (testResp.text !== undefined) {
+        process.env.GEMINI_API_KEY = key;
+        return res.json({ ok: true, message: 'Clé API Gemini validée avec succès !' });
+      }
+      return res.status(400).json({ ok: false, error: 'Réponse vide de Gemini.' });
+    } catch (err: any) {
+      console.warn('Validation clé API échouée:', err);
+      return res.status(400).json({ ok: false, error: err?.message || 'Clé API Gemini invalide ou sans quota.' });
+    }
+  });
+
+  // Push local repository to GitHub
+  app.post('/api/github/push', async (req: Request, res: Response) => {
+    try {
+      const { token, repoUrl = 'https://github.com/nathsrb/LivreVox.git' } = req.body as {
+        token?: string;
+        repoUrl?: string;
+      };
+      const cleanToken = (token || process.env.GITHUB_TOKEN || '').trim();
+      if (!cleanToken) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Veuillez renseigner votre jeton d’accès GitHub (Personal Access Token).',
+        });
+      }
+
+      const match = repoUrl.match(/github\.com\/([^/]+)\/([^/.]+)(?:\.git)?/i);
+      if (!match) {
+        return res.status(400).json({ ok: false, error: 'URL de dépôt GitHub invalide.' });
+      }
+      const owner = match[1];
+      const repo = match[2];
+      const authedUrl = `https://${cleanToken}@github.com/${owner}/${repo}.git`;
+
+      const { exec } = await import('node:child_process');
+      const util = await import('node:util');
+      const execAsync = util.promisify(exec);
+
+      // Make sure main branch is active and commit is ready
+      await execAsync('git branch -M main');
+      // Push with authentication
+      const { stdout, stderr } = await execAsync(`git push -u "${authedUrl}" main`);
+
+      return res.json({
+        ok: true,
+        message: '✓ Dépôt GitHub synchronisé avec succès sur la branche main !',
+        output: (stdout || stderr || '').trim(),
+      });
+    } catch (err: any) {
+      console.error('GitHub push error:', err);
+      const msg = err?.message || 'Erreur lors du push GitHub';
+      if (
+        msg.includes('Authentication failed') ||
+        msg.includes('403') ||
+        msg.includes('Bad credentials') ||
+        msg.includes('could not read Username')
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error:
+            'Authentification GitHub échouée : vérifiez que votre Personal Access Token GitHub est valide et dispose de la permission « repo » (ou Contents Read & Write).',
+        });
+      }
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  // Direct download route for the current AI Studio codebase.
+  // Builds the ZIP at request time so the button works even when no prebuilt archive exists.
+  app.get('/api/download-zip', (_req: Request, res: Response) => {
+    try {
+      const entries: Record<string, Uint8Array> = {};
+      const ignoredDirs = new Set([
+        'node_modules', '.git', 'dist', '.cloud_storage', '.vite', '.cache', 'coverage', '.next', '.netlify'
+      ]);
+      const ignoredFiles = new Set(['Auralis-LivreVox-code.zip', 'auralis-source-code.zip']);
+
+      function addDirectory(dir: string, relativeDir = '') {
+        for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (item.name.startsWith('.') && item.name !== '.env.example' && item.name !== '.gitignore' && item.name !== '.github') {
+            continue;
+          }
+          if (item.isDirectory() && ignoredDirs.has(item.name)) continue;
+          if (item.isFile() && ignoredFiles.has(item.name)) continue;
+
+          const absolutePath = path.join(dir, item.name);
+          const archivePath = path.posix.join(relativeDir, item.name);
+
+          if (item.isDirectory()) {
+            addDirectory(absolutePath, archivePath);
+          } else if (item.isFile()) {
+            const stat = fs.statSync(absolutePath);
+            if (stat.size <= 25 * 1024 * 1024) {
+              entries[archivePath] = new Uint8Array(fs.readFileSync(absolutePath));
+            }
+          }
+        }
+      }
+
+      addDirectory(__dirname);
+      if (Object.keys(entries).length === 0) {
+        return res.status(500).json({ error: 'Aucun fichier source à ajouter au ZIP.' });
+      }
+
+      const zipped = zipSync(entries, { level: 6 });
+      const buffer = Buffer.from(zipped);
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename="Auralis-LivreVox-code.zip"',
+        'Content-Length': buffer.length,
+        'Cache-Control': 'no-store',
+      });
+      res.end(buffer);
+    } catch (err: any) {
+      console.error('Erreur /api/download-zip:', err);
+      res.status(500).json({ error: err?.message || 'Impossible de générer le ZIP du code.' });
+    }
+  });
+
+  // Generate structured AI book summary for chapter (Auralis AI Assistant)
+  app.post('/api/chapters/summary', async (req: Request, res: Response) => {
+    try {
+      const { chapterText, chapterTitle, bookTitle, previousChaptersContext, customApiKey } = req.body as {
+        chapterText?: string;
+        chapterTitle?: string;
+        bookTitle?: string;
+        previousChaptersContext?: string;
+        customApiKey?: string;
+      };
+
+      if (!chapterText || !chapterText.trim()) {
+        return res.status(400).json({ error: 'Le texte du chapitre est requis pour générer le résumé.' });
+      }
+
+      const key =
+        (req.headers['x-gemini-api-key'] as string) ||
+        customApiKey ||
+        process.env.GEMINI_API_KEY;
+
+      const ai = getAi(key);
+
+      const prompt = `Tu es une IA spécialisée dans la compréhension, la synthèse et la mémorisation de livres.
+
+Ta mission est d’analyser le chapitre fourni et de produire un résumé extrêmement utile pour une personne qui écoute le livre sous forme de livre audio.
+
+L’objectif n’est PAS simplement de raccourcir le texte.
+
+Le résumé doit permettre à l’utilisateur :
+- de comprendre ce qui s’est passé ou ce qui a été expliqué ;
+- de retenir les informations essentielles ;
+- de reprendre facilement son écoute plus tard ;
+- de comprendre le chapitre suivant sans avoir besoin de réécouter celui-ci.
+
+IMPORTANT — ANTI-SPOILER
+
+Tu dois te baser principalement sur le chapitre fourni.
+Tu peux utiliser le contexte des chapitres précédents uniquement pour comprendre les références, personnages, événements ou concepts déjà introduits.
+Tu ne dois JAMAIS révéler une information provenant d’un chapitre suivant.
+Ne prédis pas la suite de l’histoire.
+Ne transforme pas des indices en certitudes.
+Si une information n’est pas explicitement présente dans le chapitre, ne l’invente pas.
+
+ADAPTATION AU TYPE DE LIVRE
+
+Commence par identifier silencieusement le type de contenu :
+- roman / fiction ;
+- biographie ;
+- histoire ;
+- essai ;
+- développement personnel ;
+- business ;
+- philosophie ;
+- sciences ;
+- manuel scolaire ;
+- livre professionnel ;
+- autre contenu documentaire.
+
+Adapte ensuite le résumé au type de livre.
+Pour une fiction, privilégie : événements, personnages, décisions, conflits, révélations, évolution des personnages, causes et conséquences.
+Pour un livre documentaire, privilégie : idées, concepts, arguments, méthodes, exemples importants, chiffres réellement utiles, conclusions, applications pratiques.
+Ne force jamais une catégorie qui n’a pas de sens.
+
+STRUCTURE DE SORTIE STRICTE (utilise exactement ces titres avec ces émojis) :
+
+### ⚡ Le chapitre en 30 secondes
+(Résume le chapitre en 3 à 6 phrases maximum. Va directement à l'information importante sans phrase d'introduction générique.)
+
+---
+
+### 📖 Résumé détaillé
+(Produis un résumé clair, fluide et structuré de 150 à 400 mots respectant l'ordre logique ou chronologique.)
+
+---
+
+### 🧠 À retenir
+(Sélectionne entre 3 et 7 éléments maximum, courts, précis et faciles à mémoriser sous forme de puces tirets.)
+
+---
+
+### 👥 Personnages importants
+(Affiche cette section uniquement si des personnages jouent un rôle significatif : **Nom du personnage** — rôle dans le chapitre, action importante ou évolution notable.)
+
+OU (si le livre n'est pas narratif) :
+
+### 💡 Concepts importants
+(**Nom du concept** — définition ou rôle expliqué simplement en une ou deux phrases.)
+
+---
+
+### 🔗 Pourquoi ce chapitre est important
+(Explique en 2 à 4 phrases le rôle de ce chapitre dans l’ensemble du livre, sans spoiler la suite.)
+
+---
+
+### 🎯 Si tu ne devais retenir qu’une seule chose
+(Écris UNE seule phrase forte représentant le cœur ou la leçon essentielle du chapitre.)
+
+---
+
+DONNÉES FOURNIES :
+TITRE DU LIVRE : ${bookTitle || 'Livre audio'}
+TITRE DU CHAPITRE : ${chapterTitle || 'Chapitre'}
+${previousChaptersContext ? `CONTEXTE DES CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
+CONTENU DU CHAPITRE :
+${chapterText.slice(0, 48000)}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+
+      const summary = response.text || '';
+      res.json({ summary });
+    } catch (err: any) {
+      console.error('Erreur génération résumé IA:', err);
+      res.status(500).json({ error: err?.message || 'Erreur lors de la génération du résumé IA.' });
     }
   });
 
@@ -470,7 +767,7 @@ async function startServer() {
         processingProgress: 20,
         audioReady: 0,
         ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-        ttsProvider: 'gemini-3.8-flash-lite-tts',
+        ttsProvider: 'gemini-3.8-flash-tts',
         chapters: [],
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -537,7 +834,7 @@ async function startServer() {
       processingProgress: 0,
       audioReady: 0,
       ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-lite-tts',
+      ttsProvider: 'gemini-3.8-flash-tts',
       chapters: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -647,7 +944,7 @@ async function startServer() {
       processingProgress: job.processingProgress,
       audioReady: job.audioReady,
       ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-lite-tts',
+      ttsProvider: 'gemini-3.8-flash-tts',
       error: job.error,
       chapters: job.chapters.map(c => ({
         id: c.id,
@@ -682,7 +979,11 @@ async function startServer() {
 
     try {
       job.status = 'generating_audio';
-      const audioBuffer = await synthesizeSpeech(targetChapter.text, voiceName || 'Kore');
+      const customKey =
+        (req.headers['x-gemini-api-key'] as string) ||
+        (req.body as any)?.apiKey ||
+        process.env.GEMINI_API_KEY;
+      const audioBuffer = await synthesizeSpeech(targetChapter.text, voiceName || 'Kore', customKey);
       const outFile = audioPathFor(job.id, targetChapter.id);
       fs.writeFileSync(outFile, audioBuffer);
 
@@ -723,7 +1024,11 @@ async function startServer() {
 
     try {
       const voice = (req.body as { voice?: string })?.voice || 'Kore';
-      const audioBuffer = await synthesizeSpeech(pending.text, voice);
+      const customKey =
+        (req.headers['x-gemini-api-key'] as string) ||
+        (req.body as any)?.apiKey ||
+        process.env.GEMINI_API_KEY;
+      const audioBuffer = await synthesizeSpeech(pending.text, voice, customKey);
       const outFile = audioPathFor(job.id, pending.id);
       fs.writeFileSync(outFile, audioBuffer);
       pending.hasAudio = true;
@@ -839,7 +1144,7 @@ async function startServer() {
       processingProgress: 100,
       audioReady: 0,
       ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-lite-tts',
+      ttsProvider: 'gemini-3.8-flash-tts',
       chapters: [
         {
           id: 'demo-ch-1',
@@ -950,7 +1255,7 @@ Le mystère pouvait commencer.`,
   }
 
   app.listen(PORT, HOST, () => {
-    console.log(`[LivreVox Cloud] Serveur actif sur http://${HOST}:${PORT}`);
+    console.log(`[Auralis Cloud] Serveur actif sur http://${HOST}:${PORT}`);
   });
 }
 

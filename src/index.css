@@ -214,6 +214,7 @@ button:disabled {
 .lv-main {
   min-width: 0;
   min-height: 100vh;
+  padding-bottom: 120px;
 }
 .lv-topbar {
   height: 72px;
@@ -749,6 +750,9 @@ button:disabled {
     transform: rotate(360deg);
   }
 }
+.lv-spin {
+  animation: spin 0.9s linear infinite;
+}
 .lv-import-box h3 {
   margin: 0 0 6px;
 }
@@ -957,3 +961,616 @@ button:disabled {
     width: 100%;
   }
 }
+
+/* ============================================================
+   Lecteur Audio Intégré Haute Performance & Mode Immersif
+   ============================================================ */
+.lv-player-card {
+  margin-top: 14px;
+  padding: 18px;
+  background: linear-gradient(180deg, rgba(26, 34, 56, 0.8) 0%, rgba(17, 24, 42, 0.95) 100%);
+  border: 1px solid rgba(125, 97, 255, 0.22);
+  border-radius: 18px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lv-player-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lv-player-track-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.lv-player-cover {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7d61ff 0%, #3b82f6 100%);
+  display: grid;
+  place-items: center;
+  color: white;
+  flex-shrink: 0;
+  box-shadow: 0 4px 14px rgba(125, 97, 255, 0.35);
+}
+
+.lv-player-titles {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.lv-player-titles strong {
+  font-size: 14px;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lv-player-titles small {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lv-player-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.lv-ctrl-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.lv-ctrl-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  transform: scale(1.06);
+}
+
+.lv-ctrl-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.lv-ctrl-btn-play {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  border: none;
+  color: white;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(125, 97, 255, 0.45);
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.lv-ctrl-btn-play:hover {
+  transform: scale(1.08);
+  box-shadow: 0 8px 26px rgba(125, 97, 255, 0.6);
+}
+
+.lv-ctrl-btn-play:active {
+  transform: scale(0.95);
+}
+
+.lv-skip-label {
+  position: absolute;
+  bottom: 2px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.lv-scrubber-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.lv-time-display {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #94a3b8;
+  font-weight: 500;
+  min-width: 40px;
+}
+
+.lv-time-display.lv-time-right {
+  text-align: right;
+}
+
+.lv-scrubber-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: #1e293b;
+  outline: none;
+  cursor: pointer;
+  position: relative;
+  transition: height 0.15s;
+}
+
+.lv-scrubber-slider:hover {
+  height: 8px;
+}
+
+.lv-scrubber-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.8);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.lv-scrubber-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.3);
+}
+
+.lv-player-footer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.lv-player-mode-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+.lv-player-mode-tag.instant {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.lv-player-actions-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Barres animées d'égaliseur */
+.lv-eq-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+
+.lv-eq-bar {
+  width: 3px;
+  background: #a78bfa;
+  border-radius: 2px;
+  animation: lv-eq 0.75s ease-in-out infinite alternate;
+}
+.lv-eq-bar:nth-child(1) { height: 6px; animation-delay: 0.1s; }
+.lv-eq-bar:nth-child(2) { height: 14px; animation-delay: 0.35s; }
+.lv-eq-bar:nth-child(3) { height: 10px; animation-delay: 0.2s; }
+.lv-eq-bar:nth-child(4) { height: 8px; animation-delay: 0.45s; }
+
+@keyframes lv-eq {
+  0% { height: 3px; }
+  100% { height: 14px; }
+}
+
+/* Lecteur persistant en bas d'écran (Sticky Bottom Bar) */
+.lv-docked-player {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 75;
+  background: rgba(11, 15, 29, 0.96);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-top: 1px solid rgba(125, 97, 255, 0.35);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.6);
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  animation: lv-slide-up 0.25s ease-out;
+}
+
+@media (min-width: 901px) {
+  .lv-docked-player {
+    left: 286px;
+  }
+}
+
+@keyframes lv-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.lv-docked-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 180px;
+  max-width: 280px;
+}
+
+.lv-docked-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.lv-docked-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Mode Immersif Plein Écran */
+.lv-immersive-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  background: radial-gradient(circle at 50% 15%, #1e1b4b 0%, #090d16 85%);
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  overflow-y: auto;
+  color: white;
+  animation: lv-fade-in 0.2s ease-out;
+}
+
+@keyframes lv-fade-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.lv-immersive-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.lv-immersive-body {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+
+.lv-immersive-artwork {
+  width: 220px;
+  height: 220px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+  display: grid;
+  place-items: center;
+  color: white;
+  box-shadow: 0 20px 50px rgba(124, 58, 237, 0.45);
+  position: relative;
+  overflow: hidden;
+}
+
+.lv-immersive-artwork-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, rgba(255,255,255,0.2) 0%, transparent 70%);
+}
+
+.lv-immersive-meta {
+  text-align: center;
+}
+
+.lv-immersive-meta h2 {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 6px 0;
+  color: #ffffff;
+}
+
+.lv-immersive-meta p {
+  font-size: 14px;
+  color: #94a3b8;
+  margin: 0;
+}
+
+.lv-immersive-controls {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lv-immersive-reader {
+  width: 100%;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 22px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-size: 15px;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+.lv-paragraph-item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.lv-paragraph-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.lv-paragraph-item.active {
+  background: rgba(125, 97, 255, 0.18);
+  border-left: 3px solid #a78bfa;
+  color: #ffffff;
+}
+
+/* ============================================================
+   Auralis : Résumé IA, Reprise Automatique & Statuts Audio
+   ============================================================ */
+
+/* Bannière de reprise automatique */
+.lv-resume-banner {
+  background: linear-gradient(135deg, rgba(30, 27, 75, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  border-radius: 14px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  animation: lv-slide-up 0.2s ease-out;
+}
+
+.lv-resume-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.lv-resume-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(167, 139, 250, 0.15);
+  color: #a78bfa;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.lv-resume-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.lv-resume-text strong {
+  font-size: 13px;
+  color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lv-resume-text span {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.lv-resume-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Gros CTA Hero "Commencer l'écoute" */
+.lv-hero-cta {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  color: white;
+  border: none;
+  border-radius: 14px;
+  padding: 13px 20px;
+  font-size: 14px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  box-shadow: 0 8px 25px rgba(139, 92, 246, 0.45);
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  margin-top: 10px;
+  width: 100%;
+}
+
+.lv-hero-cta:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px rgba(139, 92, 246, 0.6);
+}
+
+.lv-hero-cta:active {
+  transform: translateY(0);
+}
+
+/* Statuts audio des chapitres */
+.lv-chapter-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.lv-chapter-badge.ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.lv-chapter-badge.playing {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+}
+
+.lv-chapter-badge.loading {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde047;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.lv-chapter-badge.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Section Résumé IA Auralis */
+.lv-summary-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lv-summary-hero {
+  background: linear-gradient(135deg, rgba(30, 27, 75, 0.8) 0%, rgba(15, 23, 42, 0.9) 100%);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 16px;
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.lv-summary-hero-copy h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f8fafc;
+  margin: 0 0 6px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lv-summary-hero-copy p {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 0;
+}
+
+.lv-summary-content {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  line-height: 1.65;
+  color: #e2e8f0;
+}
+
+.lv-summary-content h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: #a78bfa;
+  margin: 12px 0 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lv-summary-content hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 8px 0;
+}
+
+.lv-summary-content p {
+  margin: 0 0 8px 0;
+}
+
+.lv-summary-content ul {
+  margin: 0 0 8px 0;
+  padding-left: 20px;
+}
+
+.lv-summary-content li {
+  margin-bottom: 4px;
+}
+
+.lv-summary-content strong {
+  color: #ffffff;
+}
+
+/* Mobile safe area adjustments */
+.lv-docked-player {
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+

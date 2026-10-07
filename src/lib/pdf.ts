@@ -1,3 +1,4 @@
+import './polyfills';
 import * as pdfjsLib from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { ImportProgress } from '../types';
@@ -15,6 +16,9 @@ type PdfResult = {
   pages: number;
   ocrUsed: boolean;
 };
+
+type PdfPasswordUpdater = (password: string | Error) => void;
+type PdfProgress = { loaded: number; total: number };
 
 class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
   private readonly file: File;
@@ -35,13 +39,41 @@ class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
       })
       .catch(error => {
         console.error('Lecture locale du PDF impossible', error);
-        if (!this.aborted) this.onDataRange(begin, null);
       });
   }
 
   abort(): void {
     this.aborted = true;
   }
+}
+
+async function createPdfLoadingTask(file: File) {
+  // Pour les fichiers sous 60 Mo, charger directement les octets en mémoire
+  // évite tout bogue de ReadableStream ou de RangeTransport sur Safari iOS
+  if (file.size < 60 * 1024 * 1024) {
+    const arrayBuffer = await file.arrayBuffer();
+    return {
+      task: pdfjsLib.getDocument({
+        data: new Uint8Array(arrayBuffer),
+        disableAutoFetch: true,
+        disableStream: true,
+      }),
+      cleanup: () => {},
+    };
+  }
+
+  const rangeTransport = new LocalFileRangeTransport(file);
+  return {
+    task: pdfjsLib.getDocument({
+      range: rangeTransport,
+      rangeChunkSize: 1024 * 1024,
+      disableAutoFetch: true,
+      disableStream: true,
+    }),
+    cleanup: () => {
+      rangeTransport.abort();
+    },
+  };
 }
 
 function textFromContent(items: Array<unknown>): string {
@@ -61,14 +93,9 @@ export async function renderPdfPageImage(
   pageNumber: number,
   requestPassword?: (incorrect: boolean) => Promise<string | null>
 ): Promise<Blob> {
-  const rangeTransport = new LocalFileRangeTransport(file);
-  const loadingTask = pdfjsLib.getDocument({
-    range: rangeTransport,
-    rangeChunkSize: 1024 * 1024,
-    disableAutoFetch: true,
-    disableStream: true,
-  });
-  loadingTask.onPassword = (updatePassword: (password: string | Error) => void, reason: unknown) => {
+  const { task: loadingTask, cleanup } = await createPdfLoadingTask(file);
+
+  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = requestPassword ? await requestPassword(incorrect) : null;
@@ -76,26 +103,41 @@ export async function renderPdfPageImage(
       else updatePassword(new Error('Ouverture du PDF annulée.'));
     })();
   };
+
   let canvas: HTMLCanvasElement | null = null;
   try {
     const pdf = await loadingTask.promise;
-    if (pageNumber < 1 || pageNumber > pdf.numPages) throw new Error('Page PDF invalide.');
+    if (pageNumber < 1 || pageNumber > pdf.numPages)
+      throw new Error('Page PDF invalide.');
     const page = await pdf.getPage(pageNumber);
     try {
-      const viewport = page.getViewport({ scale: 1.55 });
+      const viewport = page.getViewport({ scale: 1.2 });
       canvas = globalThis.document.createElement('canvas');
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext('2d', { alpha: false });
-      if (!context) throw new Error('Impossible de préparer la page pour l’OCR cloud.');
-      await page.render({ canvasContext: context, viewport, canvas } as any).promise;
-      return await new Promise<Blob>((resolve, reject) => canvas!.toBlob(blob => blob ? resolve(blob) : reject(new Error('Impossible de convertir la page en image.')), 'image/jpeg', 0.86));
+      if (!context) throw new Error('Impossible de préparer la page.');
+      await page.render({ canvas, canvasContext: context, viewport }).promise;
+      return await new Promise<Blob>((resolve, reject) =>
+        canvas!.toBlob(
+          blob =>
+            blob
+              ? resolve(blob)
+              : reject(new Error('Impossible de convertir la page en image.')),
+          'image/jpeg',
+          0.8
+        )
+      );
     } finally {
       page.cleanup();
     }
   } finally {
-    if (canvas) { canvas.width = 0; canvas.height = 0; canvas.remove(); }
-    rangeTransport.abort();
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+    }
+    cleanup();
     await loadingTask.destroy().catch(() => undefined);
   }
 }
@@ -105,115 +147,67 @@ export async function extractPdf(
   options: PdfOptions,
   onProgress: (progress: ImportProgress) => void
 ): Promise<PdfResult> {
-  onProgress({ stage: 'Ouverture du PDF par blocs', progress: 2 });
-  const rangeTransport = new LocalFileRangeTransport(file);
-  const loadingTask = pdfjsLib.getDocument({
-    range: rangeTransport,
-    rangeChunkSize: 1024 * 1024,
-    disableAutoFetch: true,
-    disableStream: true,
-  });
+  onProgress({ stage: 'Ouverture du PDF', progress: 2 });
+  const { task: loadingTask, cleanup } = await createPdfLoadingTask(file);
 
-  loadingTask.onProgress = (progress: { loaded: number; total: number }) => {
+  loadingTask.onProgress = (progress: PdfProgress) => {
     if (!progress.total) return;
     const ratio = Math.max(0, Math.min(1, progress.loaded / progress.total));
     onProgress({
-      stage: 'Lecture des données nécessaires',
+      stage: 'Lecture du document',
       progress: Math.max(2, Math.min(7, Math.round(ratio * 7))),
     });
   };
 
-  loadingTask.onPassword = (updatePassword: (password: string | Error) => void, reason: unknown) => {
+  loadingTask.onPassword = (updatePassword: PdfPasswordUpdater, reason: number) => {
     void (async () => {
       const incorrect = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
       const password = options.requestPassword
         ? await options.requestPassword(incorrect)
         : null;
-      if (password) {
-        updatePassword(password);
-      } else {
-        updatePassword(new Error('Ouverture du PDF annulée.'));
-      }
+      if (password) updatePassword(password);
+      else updatePassword(new Error('Ouverture du PDF annulée.'));
     })();
   };
 
   const pageTexts: string[] = [];
-  let ocrUsed = false;
-  let ocrWorker: Awaited<
-    ReturnType<(typeof import('tesseract.js'))['createWorker']>
-  > | null = null;
 
   try {
     const pdfDocument = await loadingTask.promise;
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       const page = await pdfDocument.getPage(pageNumber);
-      let canvas: HTMLCanvasElement | null = null;
-
       try {
         const content = await page.getTextContent();
-        let pageText = textFromContent(content.items as Array<unknown>);
-        const shouldOcr =
-          options.autoOcr && pageText.replace(/\s/g, '').length < 70;
+        const pageText = textFromContent(content.items as Array<unknown>);
 
-        if (shouldOcr) {
-          if (!ocrWorker) {
-            onProgress({
-              stage: 'Chargement de l’OCR local',
-              progress: Math.max(
-                8,
-                Math.round((pageNumber / pdfDocument.numPages) * 70)
-              ),
-            });
-            const { createWorker } = await import('tesseract.js');
-            ocrWorker = await createWorker(options.ocrLang);
-          }
-
-          const viewport = page.getViewport({ scale: 1.55 });
-          canvas = globalThis.document.createElement('canvas');
-          canvas.width = Math.ceil(viewport.width);
-          canvas.height = Math.ceil(viewport.height);
-          const context = canvas.getContext('2d', { alpha: false });
-          if (!context)
-            throw new Error('Impossible de préparer cette page pour l’OCR.');
-
-          await page.render({ canvasContext: context, viewport, canvas } as any).promise;
-          const recognition = await ocrWorker.recognize(canvas);
-          if (recognition.data.text.trim().length > pageText.trim().length)
-            pageText = recognition.data.text.trim();
-          ocrUsed = true;
+        // Auralis lit uniquement le vrai texte du PDF.
+        // Les images, illustrations et pages scannées sans couche texte sont ignorées.
+        if (pageText.replace(/\s/g, '').length >= 20) {
+          pageTexts.push(pageText);
         }
 
-        pageTexts.push(pageText);
         onProgress({
-          stage: shouldOcr
-            ? `OCR de la page ${pageNumber}/${pdfDocument.numPages}`
-            : `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
-          progress:
-            8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
+          stage: `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
+          progress: 8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
         });
       } finally {
-        if (canvas) {
-          canvas.width = 0;
-          canvas.height = 0;
-          canvas.remove();
-        }
         page.cleanup();
       }
     }
 
     onProgress({
-      stage: 'Nettoyage et création des chapitres',
+      stage: 'Création des chapitres',
       progress: 95,
     });
+
     return {
       text: pageTexts.join('\n\n'),
       pages: pdfDocument.numPages,
-      ocrUsed,
+      ocrUsed: false,
     };
   } finally {
-    if (ocrWorker) await ocrWorker.terminate();
-    rangeTransport.abort();
+    cleanup();
     await loadingTask.destroy().catch(() => undefined);
   }
 }
