@@ -404,100 +404,111 @@ async function startServer() {
 
   // Capabilities API
   app.get('/api/cloud/capabilities', (req: Request, res: Response) => {
-    const hasKey = Boolean(process.env.GEMINI_API_KEY || req.headers['x-gemini-api-key']);
+    const provider = normalizeProvider((req.headers['x-tts-provider'] as string) || process.env.TTS_PROVIDER);
+    const hasRequestKey = Boolean(req.headers['x-api-key']);
+    const hasEnvKey =
+      provider === 'deepinfra'
+        ? Boolean(process.env.DEEPINFRA_API_KEY)
+        : provider === 'aws-polly'
+          ? Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+          : Boolean(process.env.GEMINI_API_KEY);
     res.json({
-      cloud: true,
-      mode: '100% Cloud Gemini Flash',
-      ttsConfigured: hasKey,
-      ttsProvider: 'gemini-3.8-flash-tts',
-      textModel: 'gemini-3.8-flash',
-      chunkUpload: true,
-      ocr: true,
-      voices: [
-        { id: 'Kore', name: 'Kore (Voix féminine claire et douce)', gender: 'female' },
-        { id: 'Puck', name: 'Puck (Voix masculine expressive et rythmée)', gender: 'male' },
-        { id: 'Zephyr', name: 'Zephyr (Voix calme, chaleureuse et équilibrée)', gender: 'neutral' },
-        { id: 'Charon', name: 'Charon (Voix grave, posée et narrative)', gender: 'male' },
-        { id: 'Fenrir', name: 'Fenrir (Voix dynamique et affirmée)', gender: 'male' },
-      ],
+      cloud: false,
+      mode: 'Multi-provider TTS',
+      ttsConfigured: hasRequestKey || hasEnvKey,
+      ttsProvider: provider,
+      chunkUpload: false,
+      ocr: false,
+      providers: ['deepinfra', 'gemini', 'aws-polly'],
     });
   });
 
-  // Standard health check used by frontend isRemoteTtsAvailable
-  app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({
-      ok: true,
-      provider: process.env.GEMINI_API_KEY ? 'gemini' : 'local-fallback',
-      ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      model: process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts',
-    });
+  app.get('/api/health', (req: Request, res: Response) => {
+    const provider = normalizeProvider((req.headers['x-tts-provider'] as string) || process.env.TTS_PROVIDER);
+    const configured =
+      Boolean(req.headers['x-api-key']) ||
+      (provider === 'deepinfra'
+        ? Boolean(process.env.DEEPINFRA_API_KEY)
+        : provider === 'aws-polly'
+          ? Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+          : Boolean(process.env.GEMINI_API_KEY));
+    res.json({ ok: true, provider: configured ? provider : 'local-fallback', ttsConfigured: configured });
   });
 
-  // Direct TTS endpoint used by frontend synthesizeRemoteChunk
   app.post('/api/tts', async (req: Request, res: Response) => {
     try {
       const body = req.body || {};
-      const customKey =
-        (req.headers['x-gemini-api-key'] as string) ||
-        (body.apiKey as string) ||
-        process.env.GEMINI_API_KEY;
-
-      if (!customKey) {
-        return res.status(503).json({
-          error: 'Gemini n’est pas configuré. Variable GEMINI_API_KEY manquante.',
-        });
-      }
+      const provider = normalizeProvider(
+        (body.provider as string) ||
+        (req.headers['x-tts-provider'] as string) ||
+        process.env.TTS_PROVIDER
+      );
+      const apiKey = String(
+        body.apiKey ||
+        req.headers['x-api-key'] ||
+        (provider === 'deepinfra'
+          ? process.env.DEEPINFRA_API_KEY
+          : provider === 'aws-polly'
+            ? process.env.AWS_ACCESS_KEY_ID
+            : process.env.GEMINI_API_KEY) ||
+        ''
+      ).trim();
+      const apiSecret = String(
+        body.apiSecret ||
+        req.headers['x-api-secret'] ||
+        process.env.AWS_SECRET_ACCESS_KEY ||
+        ''
+      ).trim();
+      const region = String(
+        body.region ||
+        req.headers['x-aws-region'] ||
+        process.env.AWS_REGION ||
+        'eu-west-3'
+      ).trim();
       const text = typeof body.text === 'string' ? body.text.trim() : '';
-      if (!text) {
-        return res.status(400).json({ error: 'Texte vide.' });
-      }
+      if (!text) return res.status(400).json({ error: 'Texte vide.' });
+      if (!apiKey) return res.status(503).json({ error: 'Identifiant API manquant pour le fournisseur sélectionné.' });
 
-      const voice = body.voice || process.env.GEMINI_TTS_VOICE || 'Kore';
-      const model = body.model || process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts';
-      const wavBuffer = await synthesizeSpeech(text, voice, customKey);
+      const defaultVoice = provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
+      const voice = String(body.voice || defaultVoice);
+      const result = await synthesizeSpeech(text, voice, { provider, apiKey, apiSecret, region });
 
       res.json({
-        audio: wavBuffer.toString('base64'),
-        mimeType: 'audio/wav',
-        model,
+        audio: result.buffer.toString('base64'),
+        mimeType: result.mimeType,
+        provider,
         voice,
       });
     } catch (err: any) {
       console.error('Erreur /api/tts:', err);
-      const isQuota =
-        err?.message?.includes('429') ||
-        err?.message?.includes('RESOURCE_EXHAUSTED') ||
-        err?.message?.includes('quota') ||
-        err?.status === 429;
+      const isQuota = /429|RESOURCE_EXHAUSTED|quota|throttl/i.test(err?.message || '');
       res.status(isQuota ? 429 : 500).json({
-        error: isQuota
-          ? 'Limite temporaire de débit Gemini atteinte. Veuillez patienter quelques secondes.'
-          : err?.message || 'Erreur synthèse vocale Gemini Flash.',
+        error: err?.message || 'Erreur de synthèse vocale.',
         isQuota,
       });
     }
   });
 
-  // Test and validate custom Gemini API key
   app.post('/api/validate-key', async (req: Request, res: Response) => {
     try {
-      const key = (req.body?.apiKey || (req.headers['x-gemini-api-key'] as string) || '').trim();
-      if (!key) {
-        return res.status(400).json({ ok: false, error: 'Veuillez saisir votre clé API.' });
+      const provider = normalizeProvider(req.body?.provider || (req.headers['x-tts-provider'] as string));
+      const apiKey = String(req.body?.apiKey || req.headers['x-api-key'] || '').trim();
+      const apiSecret = String(req.body?.apiSecret || req.headers['x-api-secret'] || '').trim();
+      const region = String(req.body?.region || req.headers['x-aws-region'] || 'eu-west-3').trim();
+      if (!apiKey) return res.status(400).json({ ok: false, error: 'Veuillez saisir vos identifiants API.' });
+      if (provider === 'aws-polly' && !apiSecret) {
+        return res.status(400).json({ ok: false, error: 'AWS Secret Access Key manquante.' });
       }
-      const testAi = getAi(key);
-      const testResp = await testAi.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: 'Ping',
+      await synthesizeProviderSpeech('Test de connexion LivreVox.', provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore', {
+        provider,
+        apiKey,
+        apiSecret,
+        region,
       });
-      if (testResp.text !== undefined) {
-        process.env.GEMINI_API_KEY = key;
-        return res.json({ ok: true, message: 'Clé API Gemini validée avec succès !' });
-      }
-      return res.status(400).json({ ok: false, error: 'Réponse vide de Gemini.' });
+      return res.json({ ok: true, provider, message: `Connexion ${provider} validée.` });
     } catch (err: any) {
-      console.warn('Validation clé API échouée:', err);
-      return res.status(400).json({ ok: false, error: err?.message || 'Clé API Gemini invalide ou sans quota.' });
+      console.warn('Validation API échouée:', err);
+      return res.status(400).json({ ok: false, error: err?.message || 'Identifiants API invalides ou sans quota.' });
     }
   });
 
@@ -612,24 +623,31 @@ async function startServer() {
   // Generate structured AI book summary for chapter (Auralis AI Assistant)
   app.post('/api/chapters/summary', async (req: Request, res: Response) => {
     try {
-      const { chapterText, chapterTitle, bookTitle, previousChaptersContext, customApiKey } = req.body as {
+      const { chapterText, chapterTitle, bookTitle, previousChaptersContext, customApiKey, provider: requestedProvider } = req.body as {
         chapterText?: string;
         chapterTitle?: string;
         bookTitle?: string;
         previousChaptersContext?: string;
         customApiKey?: string;
+        provider?: string;
       };
 
       if (!chapterText || !chapterText.trim()) {
         return res.status(400).json({ error: 'Le texte du chapitre est requis pour générer le résumé.' });
       }
 
-      const key =
-        (req.headers['x-gemini-api-key'] as string) ||
+      const provider = normalizeProvider(
+        requestedProvider ||
+        (req.headers['x-tts-provider'] as string) ||
+        process.env.TTS_PROVIDER
+      );
+      const apiKey = String(
+        (req.headers['x-api-key'] as string) ||
         customApiKey ||
-        process.env.GEMINI_API_KEY;
-
-      const ai = getAi(key);
+        (provider === 'deepinfra' ? process.env.DEEPINFRA_API_KEY : process.env.GEMINI_API_KEY) ||
+        ''
+      ).trim();
+      if (!apiKey) throw new Error('Clé API manquante pour générer le résumé.');
 
       const prompt = `Tu es une IA spécialisée dans la compréhension, la synthèse et la mémorisation de livres.
 
@@ -716,13 +734,13 @@ ${previousChaptersContext ? `CONTEXTE DES CHAPITRES PRÉCÉDENTS :\n${previousCh
 CONTENU DU CHAPITRE :
 ${chapterText.slice(0, 48000)}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const summary = await generateTextWithProvider(prompt, {
+        provider,
+        apiKey,
+        apiSecret: String(req.headers['x-api-secret'] || ''),
+        region: String(req.headers['x-aws-region'] || 'eu-west-3'),
       });
-
-      const summary = response.text || '';
-      res.json({ summary });
+      res.json({ summary, provider });
     } catch (err: any) {
       console.error('Erreur génération résumé IA:', err);
       res.status(500).json({ error: err?.message || 'Erreur lors de la génération du résumé IA.' });
@@ -776,8 +794,8 @@ ${chapterText.slice(0, 48000)}`;
         pages: 1,
         processingProgress: 20,
         audioReady: 0,
-        ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-        ttsProvider: 'gemini-3.8-flash-tts',
+        ttsConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.DEEPINFRA_API_KEY || (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)),
+        ttsProvider: process.env.TTS_PROVIDER || 'multi-provider',
         chapters: [],
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -811,7 +829,7 @@ ${chapterText.slice(0, 48000)}`;
         } catch (err: any) {
           console.error('Extraction error:', err);
           job.status = 'failed';
-          job.error = err?.message || 'Erreur lors de l’analyse du PDF par Gemini Flash.';
+          job.error = err?.message || 'L’analyse cloud directe du PDF est désactivée ; utilise l’import local LivreVox.';
           job.updatedAt = Date.now();
           saveJobToDisk(job);
         }
@@ -843,8 +861,8 @@ ${chapterText.slice(0, 48000)}`;
       pages: 1,
       processingProgress: 0,
       audioReady: 0,
-      ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-tts',
+      ttsConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.DEEPINFRA_API_KEY || (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)),
+      ttsProvider: process.env.TTS_PROVIDER || 'multi-provider',
       chapters: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -953,8 +971,8 @@ ${chapterText.slice(0, 48000)}`;
       pages: job.pages,
       processingProgress: job.processingProgress,
       audioReady: job.audioReady,
-      ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-tts',
+      ttsConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.DEEPINFRA_API_KEY || (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)),
+      ttsProvider: process.env.TTS_PROVIDER || 'multi-provider',
       error: job.error,
       chapters: job.chapters.map(c => ({
         id: c.id,
@@ -1153,8 +1171,8 @@ ${chapterText.slice(0, 48000)}`;
       pages: 3,
       processingProgress: 100,
       audioReady: 0,
-      ttsConfigured: Boolean(process.env.GEMINI_API_KEY),
-      ttsProvider: 'gemini-3.8-flash-tts',
+      ttsConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.DEEPINFRA_API_KEY || (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)),
+      ttsProvider: process.env.TTS_PROVIDER || 'multi-provider',
       chapters: [
         {
           id: 'demo-ch-1',
