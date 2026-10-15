@@ -1,31 +1,51 @@
-# LivreVox
+# LivreVox / Auralis
 
-LivreVox transforme un PDF en livre audio sans dépendre de Google AI Studio.
+LivreVox transforme un PDF en livre audio directement écoutable dans l’application.
 
-Le PDF est lu localement dans le navigateur avec PDF.js. La synthèse vocale peut ensuite utiliser plusieurs fournisseurs interchangeables :
+## Flux principal
 
-- **DeepInfra + Kokoro** — option économique recommandée ;
-- **Google Gemini** — fournisseur optionnel ;
+Le parcours prioritaire est volontairement simple :
+
+1. l’utilisateur importe un PDF ;
+2. PDF.js extrait le texte localement ;
+3. LivreVox détecte les chapitres ;
+4. si Gemini est configuré, le premier chapitre audio est généré automatiquement ;
+5. l’écoute peut commencer immédiatement ;
+6. les chapitres suivants sont générés progressivement en arrière-plan.
+
+Si aucun moteur distant n’est disponible, Piper reste disponible comme secours local.
+
+## Gemini TTS et choix des voix
+
+Gemini est le fournisseur TTS par défaut.
+
+LivreVox prend en charge :
+
+- les 30 voix studio Gemini 3.8 TTS ;
+- la bibliothèque de voix étendue via l’API Gemini Voices ;
+- les IDs de voix personnalisées `voice_...` ;
+- les clés de voix sans état `voicekey_...`.
+
+L’utilisateur peut sélectionner une voix proposée dans les réglages ou saisir directement l’ID Gemini qu’il souhaite utiliser.
+
+## Autres fournisseurs
+
+Le routage historique reste disponible :
+
+- **Google Gemini** — fournisseur par défaut et recommandé ;
+- **DeepInfra + Kokoro** — alternative TTS ;
 - **Amazon Polly** — fournisseur AWS ;
-- **Piper local** — secours hors ligne, sans clé API.
-
-## Principe
-
-L’application n’est liée à aucun studio IA ni à un SDK propriétaire unique. Le fournisseur est choisi dans les réglages et les identifiants sont transmis au backend LivreVox au moment de la génération.
-
-### Identifiants attendus
-
-- DeepInfra : une clé API.
-- Gemini : une clé API Gemini.
-- Amazon Polly : un **AWS Access Key ID**, un **AWS Secret Access Key** et une région AWS, par exemple `eu-west-3`.
+- **Piper local** — secours hors ligne.
 
 ## Architecture
 
-- `src/` : interface React/Vite, extraction PDF locale, bibliothèque locale et lecteur audio.
-- `src/lib/tts.ts` : routage TTS vers le fournisseur choisi, avec Piper en secours.
-- `server.ts` : serveur Node portable avec appels natifs aux APIs DeepInfra, Gemini et Amazon Polly.
-- `backend/index.ts` : backend AppDeploy utilisé par la version déployée.
-- Les clés ne sont pas codées en dur dans le dépôt.
+- `src/AudiobookApp.tsx` : interface, import PDF, génération progressive, lecteur et réglages de voix ;
+- `src/lib/pdf.ts` : extraction PDF / OCR ;
+- `src/lib/tts.ts` : TTS, catalogue Gemini et fallback Piper ;
+- `server.ts` : API Node pour Gemini, DeepInfra et Polly ;
+- `src/lib/storage.ts` : bibliothèque et fichiers audio locaux.
+
+Les clés API ne sont jamais codées en dur dans le dépôt.
 
 ## Lancement local
 
@@ -37,25 +57,24 @@ cp .env.example .env
 npm run dev
 ```
 
-Tu peux aussi laisser le fichier `.env` vide et entrer tes identifiants directement dans les réglages de l’application.
+Une clé peut être configurée côté serveur ou saisie dans les réglages de l’application.
 
-## Configuration serveur
+### Gemini
 
-Exemple DeepInfra :
+```env
+TTS_PROVIDER=gemini
+GEMINI_API_KEY=...
+GEMINI_TTS_MODEL=gemini-3.8-flash-lite-tts
+```
+
+### DeepInfra
 
 ```env
 TTS_PROVIDER=deepinfra
 DEEPINFRA_API_KEY=...
 ```
 
-Exemple Gemini :
-
-```env
-TTS_PROVIDER=gemini
-GEMINI_API_KEY=...
-```
-
-Exemple Amazon Polly :
+### Amazon Polly
 
 ```env
 TTS_PROVIDER=aws-polly
@@ -64,10 +83,6 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=eu-west-3
 ```
 
-## Résumés IA
+## Validation
 
-Les résumés peuvent utiliser Gemini ou un modèle texte via DeepInfra. Amazon Polly reste uniquement un moteur de synthèse vocale.
-
-## AppDeploy
-
-Une version AppDeploy est maintenue séparément avec les mêmes choix de fournisseurs. Elle permet de renseigner les identifiants directement dans les réglages et utilise Piper lorsqu’aucune clé n’est fournie.
+Chaque push sur `main` passe par GitHub Actions avec vérification TypeScript puis build Vite.
