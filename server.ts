@@ -33,8 +33,8 @@ try {
   // ignore
 }
 
-const PORT = 3000;
-const HOST = '0.0.0.0';
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '0.0.0.0';
 const STORAGE_DIR = path.join(__dirname, '.cloud_storage');
 if (!fs.existsSync(STORAGE_DIR)) {
   fs.mkdirSync(STORAGE_DIR, { recursive: true });
@@ -74,7 +74,7 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
         generationConfig: {
           responseModalities: ['AUDIO'],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } },
+            voiceConfig: { voice: voice || 'Kore' },
           },
         },
       }),
@@ -433,6 +433,85 @@ async function startServer() {
           ? Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
           : Boolean(process.env.GEMINI_API_KEY));
     res.json({ ok: true, provider: configured ? provider : 'local-fallback', ttsConfigured: configured });
+  });
+
+  const featuredGeminiVoices = [
+    ['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'],
+    ['Kore', 'Firm'], ['Fenrir', 'Excitable'], ['Leda', 'Youthful'],
+    ['Orus', 'Firm'], ['Aoede', 'Breezy'], ['Callirrhoe', 'Easy-going'],
+    ['Autonoe', 'Bright'], ['Enceladus', 'Breathy'], ['Iapetus', 'Clear'],
+    ['Umbriel', 'Easy-going'], ['Algieba', 'Smooth'], ['Despina', 'Smooth'],
+    ['Erinome', 'Clear'], ['Algenib', 'Gravelly'], ['Rasalgethi', 'Informative'],
+    ['Laomedeia', 'Upbeat'], ['Achernar', 'Soft'], ['Alnilam', 'Firm'],
+    ['Schedar', 'Even'], ['Gacrux', 'Mature'], ['Pulcherrima', 'Forward'],
+    ['Achird', 'Friendly'], ['Zubenelgenubi', 'Casual'], ['Vindemiatrix', 'Gentle'],
+    ['Sadachbia', 'Lively'], ['Sadaltager', 'Knowledgeable'], ['Sulafat', 'Warm'],
+  ].map(([id, description]) => ({
+    id,
+    name: id,
+    displayName: id,
+    description,
+    type: 'prebuilt',
+  }));
+
+  app.get('/api/voices', async (req: Request, res: Response) => {
+    const apiKey = String(
+      req.headers['x-gemini-api-key'] ||
+      req.headers['x-api-key'] ||
+      process.env.GEMINI_API_KEY ||
+      ''
+    ).trim();
+
+    if (!apiKey) {
+      return res.json({ voices: featuredGeminiVoices, source: 'featured' });
+    }
+
+    try {
+      const response = await fetch(
+        'https://generativelanguage.googleapis.com/v1beta/voices?page_size=1000',
+        { headers: { 'x-goog-api-key': apiKey, Accept: 'application/json' } }
+      );
+      if (!response.ok) throw new Error(`Gemini Voices ${response.status}: ${await response.text()}`);
+      const payload = await response.json() as any;
+      const remoteVoices = (Array.isArray(payload?.voices) ? payload.voices : [])
+        .map((voice: any) => {
+          const id = String(
+            voice?.id ||
+            voice?.voiceId ||
+            voice?.voice_id ||
+            voice?.name ||
+            ''
+          ).trim();
+          if (!id) return null;
+          return {
+            id,
+            name: id,
+            displayName: String(voice?.displayName || voice?.display_name || id),
+            description: String(voice?.description || '').trim() || undefined,
+            languageCode: voice?.languageCode || voice?.language_code,
+            accent: voice?.accent,
+            gender: voice?.gender,
+            type: voice?.type || voice?.type_,
+          };
+        })
+        .filter(Boolean);
+
+      const merged = new Map<string, any>();
+      for (const voice of featuredGeminiVoices) merged.set(voice.id, voice);
+      for (const voice of remoteVoices) merged.set(voice.id, voice);
+      return res.json({
+        voices: Array.from(merged.values()),
+        source: remoteVoices.length ? 'gemini-library' : 'featured',
+        nextPageToken: payload?.nextPageToken || payload?.next_page_token || null,
+      });
+    } catch (error: any) {
+      console.warn('Impossible de charger la bibliothèque de voix Gemini:', error?.message || error);
+      return res.json({
+        voices: featuredGeminiVoices,
+        source: 'featured-fallback',
+        warning: error?.message || 'Bibliothèque Gemini indisponible.',
+      });
+    }
   });
 
   app.post('/api/tts', async (req: Request, res: Response) => {
