@@ -560,10 +560,16 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error('Erreur /api/tts:', err);
-      const isQuota = /429|RESOURCE_EXHAUSTED|quota|throttl/i.test(err?.message || '');
-      res.status(isQuota ? 429 : 500).json({
-        error: err?.message || 'Erreur de synthèse vocale.',
+      const message = err?.message || 'Erreur de synthèse vocale.';
+      const isQuota = /429|RESOURCE_EXHAUSTED|quota|throttl/i.test(message);
+      const isAuth = /401|403|API_KEY|permission|unauthorized|forbidden/i.test(message);
+      const isBadRequest = /400|INVALID_ARGUMENT|voice|model|malformed/i.test(message);
+      const isTimeout = /timeout|délai|aborted/i.test(message);
+      const status = isQuota ? 429 : isAuth ? 401 : isBadRequest ? 400 : isTimeout ? 504 : 502;
+      res.status(status).json({
+        error: message,
         isQuota,
+        provider: normalizeProvider(req.body?.provider || (req.headers['x-tts-provider'] as string)),
       });
     }
   });
@@ -578,7 +584,7 @@ async function startServer() {
       if (provider === 'aws-polly' && !apiSecret) {
         return res.status(400).json({ ok: false, error: 'AWS Secret Access Key manquante.' });
       }
-      await synthesizeProviderSpeech('Test de connexion LivreVox.', provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore', {
+      await synthesizeProviderSpeech('Test de connexion Auralis.', provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore', {
         provider,
         apiKey,
         apiSecret,
