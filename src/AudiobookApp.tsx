@@ -69,11 +69,14 @@ import {
 import {
   CLOUD_VOICES,
   downloadVoice,
+  getGeminiVoices,
   getStoredVoices,
   getVoiceCatalog,
+  isRemoteTtsAvailable,
   makeBookZip,
   removeVoice,
   synthesizeChapter,
+  type GeminiVoiceOption,
   type VoiceCatalogItem,
 } from './lib/tts';
 
@@ -214,6 +217,7 @@ export default function AudiobookApp() {
   } | null>(null);
   const [audioMap, setAudioMap] = useState<Record<string, AudioRecord>>({});
   const [voiceCatalog, setVoiceCatalog] = useState<VoiceCatalogItem[]>([]);
+  const [geminiVoices, setGeminiVoices] = useState<GeminiVoiceOption[]>(CLOUD_VOICES);
   const [storedVoices, setStoredVoices] = useState<string[]>([]);
   const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [speechState, setSpeechState] = useState<'idle' | 'playing' | 'paused'>(
@@ -269,6 +273,23 @@ export default function AudiobookApp() {
       return null;
     }
   });
+
+  const geminiVoiceOptions = useMemo(() => {
+    const byId = new Map<string, GeminiVoiceOption>();
+    for (const voice of CLOUD_VOICES) byId.set(voice.id, voice);
+    for (const voice of geminiVoices) byId.set(voice.id, voice);
+    const selected = (settings.cloudVoice || 'Kore').trim();
+    if (selected && !byId.has(selected)) {
+      byId.set(selected, {
+        id: selected,
+        label: selected,
+        displayName: selected,
+        description: 'Voix Gemini personnalisée / bibliothèque étendue',
+        type: 'custom',
+      });
+    }
+    return Array.from(byId.values());
+  }, [geminiVoices, settings.cloudVoice]);
 
   const selectedBook = useMemo(
     () => books.find(book => book.id === selectedId) ?? null,
@@ -385,6 +406,7 @@ export default function AudiobookApp() {
 
   useEffect(() => {
     void refreshVoiceData();
+    void refreshGeminiVoiceData();
     void getCloudCapabilities().catch(() => undefined);
   }, []);
 
@@ -547,6 +569,16 @@ export default function AudiobookApp() {
     }
   }
 
+  async function refreshGeminiVoiceData(): Promise<void> {
+    if ((settings.ttsProvider || 'gemini') !== 'gemini') return;
+    try {
+      const voices = await getGeminiVoices(settings.apiKey);
+      setGeminiVoices(voices);
+    } catch {
+      setGeminiVoices(CLOUD_VOICES);
+    }
+  }
+
   function selectBook(book: Book): void {
     stopAllPlayback();
     setSelectedId(book.id);
@@ -631,9 +663,36 @@ export default function AudiobookApp() {
     setBooks(current => [book, ...current]);
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
+
+    const remoteReady = await isRemoteTtsAvailable(true, settings.apiKey);
+    const firstChapter = book.chapters[0];
+    if (remoteReady && firstChapter) {
+      setImportProgress({
+        stage: `Génération audio IA · chapitre 1/${book.chapters.length}`,
+        progress: 92,
+      });
+      const firstAudio = await generateOne(book, firstChapter, 'chapter');
+      if (firstAudio) {
+        setImportProgress({ stage: 'Premier chapitre audio prêt', progress: 100 });
+        setTimeout(() => setImportProgress(null), 450);
+        showToast(
+          book.chapters.length > 1
+            ? '▶ Le premier chapitre est prêt. Les suivants se génèrent automatiquement.'
+            : '▶ Ton livre audio est prêt à être écouté.'
+        );
+        if (book.chapters.length > 1) void generateRemainingImportedBook(book, 1);
+        return;
+      }
+    }
+
     setImportProgress({ stage: 'Livre prêt', progress: 100 });
     setTimeout(() => setImportProgress(null), 350);
-    showToast(`${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''} prêt${book.chapters.length > 1 ? 's' : ''}.`);
+    showToast(
+      remoteReady
+        ? `${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''} importé${book.chapters.length > 1 ? 's' : ''}. La génération audio pourra être relancée.`
+        : 'PDF importé. Configure une clé Gemini valide pour générer automatiquement l’audio IA.',
+      !remoteReady
+    );
   }
 
   async function importCloudFile(file: File): Promise<void> {
@@ -928,6 +987,10 @@ export default function AudiobookApp() {
       if (res.ok && data.ok) {
         setKeyTestStatus('valid');
         localStorage.setItem('auralis_api_key', key);
+        if ((settings.ttsProvider || 'gemini') === 'gemini') {
+          localStorage.setItem('auralis_gemini_api_key', key);
+          void refreshGeminiVoiceData();
+        }
         showToast(`✓ Identifiants validés pour ${settings.ttsProvider || 'gemini'}.`);
       } else {
         setKeyTestStatus('invalid');
@@ -1074,7 +1137,12 @@ export default function AudiobookApp() {
   }
 
   async function ensureVoiceReady(): Promise<boolean> {
-    if (settings.apiKey?.trim() || localStorage.getItem('auralis_api_key') || localStorage.getItem('auralis_gemini_api_key')) return true;
+    const activeKey =
+      settings.apiKey?.trim() ||
+      localStorage.getItem('auralis_api_key') ||
+      localStorage.getItem('auralis_gemini_api_key') ||
+      undefined;
+    if (await isRemoteTtsAvailable(false, activeKey)) return true;
     if (storedVoices.includes(settings.voiceId)) return true;
     setGeneration({
       active: true,
@@ -1135,7 +1203,7 @@ export default function AudiobookApp() {
         id: `${book.id}:${chapter.id}`,
         bookId: book.id,
         chapterId: chapter.id,
-        voiceId: settings.voiceId,
+        voiceId: result.engineVoiceId,
         blob: result.blob,
         duration: result.duration,
         createdAt: Date.now(),
@@ -1160,16 +1228,42 @@ export default function AudiobookApp() {
     if (record) showToast('Chapitre audio généré et enregistré localement.');
   }
 
+  async function generateRemainingImportedBook(
+    book: Book,
+    startIndex: number
+  ): Promise<void> {
+    for (let index = startIndex; index < book.chapters.length; index += 1) {
+      if (cancelGeneration.current) return;
+      const chapter = book.chapters[index];
+      const record = await generateOne(book, chapter, 'book');
+      if (!record) {
+        showToast(
+          `Génération automatique interrompue au chapitre ${index + 1}. Tu peux la reprendre depuis « Générer & exporter ».`,
+          true
+        );
+        return;
+      }
+    }
+    showToast('✓ Livre audio complet généré automatiquement.');
+  }
+
   async function generateAll(): Promise<void> {
     if (!selectedBook) return;
     cancelGeneration.current = false;
     const ready = await ensureVoiceReady();
     if (!ready) return;
+    const remoteReady = await isRemoteTtsAvailable(false, settings.apiKey);
+    const provider = settings.ttsProvider || 'gemini';
+    const defaultCloudVoice =
+      provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
+    const expectedVoiceId = remoteReady
+      ? `${provider}:${settings.cloudVoice || defaultCloudVoice}`
+      : `piper:${settings.voiceId}`;
     let completed = 0;
     for (let index = 0; index < selectedBook.chapters.length; index += 1) {
       if (cancelGeneration.current) break;
       const chapter = selectedBook.chapters[index];
-      if (audioMap[chapter.id]?.voiceId === settings.voiceId) {
+      if (audioMap[chapter.id]?.voiceId === expectedVoiceId) {
         completed += 1;
         continue;
       }
@@ -1400,7 +1494,10 @@ export default function AudiobookApp() {
             <button
               className="lv-icon-button"
               title="Réglages"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => {
+                setSettingsOpen(true);
+                void refreshGeminiVoiceData();
+              }}
             >
               <Settings size={17} />
             </button>
@@ -2228,7 +2325,11 @@ export default function AudiobookApp() {
             <p>Personnalise les voix de lecture selon tes préférences.</p>
 
             <div className="lv-field">
-              <label htmlFor="cloud-voice">Voix Cloud (selon le fournisseur)</label>
+              <label htmlFor="cloud-voice">
+                {(settings.ttsProvider || 'gemini') === 'gemini'
+                  ? 'Voix Gemini'
+                  : 'Voix Cloud'}
+              </label>
               <select
                 id="cloud-voice"
                 className="lv-select"
@@ -2240,14 +2341,45 @@ export default function AudiobookApp() {
                   }))
                 }
               >
-                {CLOUD_VOICES.map(voice => (
+                {((settings.ttsProvider || 'gemini') === 'gemini'
+                  ? geminiVoiceOptions
+                  : CLOUD_VOICES
+                ).map(voice => (
                   <option key={voice.id} value={voice.id}>
                     {voice.label}
                   </option>
-                ))}
+                )))}
               </select>
+
+              {(settings.ttsProvider || 'gemini') === 'gemini' && (
+                <>
+                  <input
+                    className="lv-input"
+                    style={{ marginTop: 8 }}
+                    value={settings.cloudVoice || 'Kore'}
+                    onChange={event =>
+                      setSettings(current => ({
+                        ...current,
+                        cloudVoice: event.target.value.trim(),
+                      }))
+                    }
+                    placeholder="Kore, voice_..., voicekey_... ou ID de la bibliothèque Gemini"
+                    aria-label="ID de voix Gemini personnalisé"
+                  />
+                  <button
+                    type="button"
+                    className="lv-secondary"
+                    style={{ width: 'auto', marginTop: 8 }}
+                    onClick={() => void refreshGeminiVoiceData()}
+                  >
+                    Actualiser les voix Gemini
+                  </button>
+                </>
+              )}
               <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                Voix utilisées lors de la génération de fichiers audio haute fidélité via l’IA.
+                {(settings.ttsProvider || 'gemini') === 'gemini'
+                  ? 'Choisis parmi les 30 voix studio Gemini, les voix de la bibliothèque étendue, ou colle directement un ID voice_… / voicekey_….'
+                  : 'Voix utilisée lors de la génération audio avec le fournisseur sélectionné.'}
               </p>
             </div>
 
