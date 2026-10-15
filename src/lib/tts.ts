@@ -349,22 +349,37 @@ export async function synthesizeChapter(
           : stored.provider === 'aws-polly'
             ? 'Amazon Polly'
             : 'Gemini';
-      onProgress(25, `${providerLabel} · génération du chapitre...`);
-      const chunkBlob = await synthesizeRemoteChunk(text, activeKey, cloudVoice);
-      onProgress(100, `Audio ${providerLabel} prêt`);
-      if (chunkBlob.type.includes('wav')) {
-        const meta = parseWav(await chunkBlob.arrayBuffer());
-        return {
-          blob: chunkBlob,
-          duration: meta.data.length / meta.byteRate,
-          engineVoiceId: `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`,
-        };
+      const remoteChunks = chunkForSpeech(text, 280);
+      const remoteBlobs: Blob[] = [];
+      for (let index = 0; index < remoteChunks.length; index += 1) {
+        if (shouldCancel()) throw new Error('Génération annulée.');
+        onProgress(
+          Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82),
+          `${providerLabel} · segment ${index + 1}/${remoteChunks.length}`
+        );
+        remoteBlobs.push(
+          await synthesizeRemoteChunk(remoteChunks[index], activeKey, cloudVoice)
+        );
       }
-      const estimatedDuration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
+      onProgress(96, `Assemblage du chapitre audio · ${providerLabel}`);
+      const engineVoiceId = `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
+
+      if (remoteBlobs.every(blob => blob.type.includes('wav'))) {
+        const merged = await mergeWavBlobs(remoteBlobs);
+        onProgress(100, `Audio ${providerLabel} prêt`);
+        return { ...merged, engineVoiceId };
+      }
+
+      const combinedBlob = new Blob(remoteBlobs, {
+        type: remoteBlobs[0]?.type || 'audio/mpeg',
+      });
+      const estimatedDuration =
+        Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
+      onProgress(100, `Audio ${providerLabel} prêt`);
       return {
-        blob: chunkBlob,
+        blob: combinedBlob,
         duration: estimatedDuration,
-        engineVoiceId: `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`,
+        engineVoiceId,
       };
     } catch (remoteError: any) {
       console.error('TTS distant erreur:', remoteError);
