@@ -2348,7 +2348,7 @@ export default function AudiobookApp() {
                   <option key={voice.id} value={voice.id}>
                     {voice.label}
                   </option>
-                )))}
+                ))}
               </select>
 
               {(settings.ttsProvider || 'gemini') === 'gemini' && (
