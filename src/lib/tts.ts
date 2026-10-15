@@ -8,6 +8,17 @@ export type VoiceCatalogItem = {
   language: string;
 };
 
+export type GeminiVoiceOption = {
+  id: string;
+  label: string;
+  displayName: string;
+  description?: string;
+  languageCode?: string;
+  accent?: string;
+  gender?: string;
+  type?: string;
+};
+
 type WavMeta = {
   channels: number;
   sampleRate: number;
@@ -128,11 +139,22 @@ function base64ToBlob(base64: string, mimeType: string): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
-export async function isRemoteTtsAvailable(force = false): Promise<boolean> {
-  if (!force && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
+export async function isRemoteTtsAvailable(
+  force = false,
+  customApiKey?: string
+): Promise<boolean> {
+  const stored = getStoredProviderConfig();
+  const activeKey = (customApiKey || stored.apiKey || '').trim();
+  if (!force && !activeKey && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
     return remoteCapabilityCache.value;
   try {
-    const response = await fetch('/api/health', { headers: { Accept: 'application/json' } });
+    const response = await fetch('/api/health', {
+      headers: {
+        Accept: 'application/json',
+        'x-tts-provider': stored.provider || 'gemini',
+        ...(activeKey ? { 'x-api-key': activeKey } : {}),
+      },
+    });
     if (!response.ok) throw new Error('API indisponible');
     const payload = (await response.json()) as { ttsConfigured?: boolean };
     const value = Boolean(payload.ttsConfigured);
@@ -144,15 +166,79 @@ export async function isRemoteTtsAvailable(force = false): Promise<boolean> {
   }
 }
 
-export const CLOUD_VOICES = [
-  { id: 'Kore', label: 'Kore · Féminine (chaleureuse, posée, idéale romans)', gender: 'Femme' },
-  { id: 'Puck', label: 'Puck · Masculine (jeune, dynamique et rythmée)', gender: 'Homme' },
-  { id: 'Zephyr', label: 'Zephyr · Voix calme (douce, discrète et claire)', gender: 'Neutre' },
-  { id: 'Charon', label: 'Charon · Masculine (grave, profonde, narrateur)', gender: 'Homme' },
-  { id: 'Fenrir', label: 'Fenrir · Masculine (posée, articulée et affirmée)', gender: 'Homme' },
-  { id: 'Aoede', label: 'Aoede · Féminine (expressive, naturelle et vivante)', gender: 'Femme' },
-  { id: 'Leda', label: 'Leda · Féminine (calme, claire et apaisante)', gender: 'Femme' },
+export const CLOUD_VOICES: GeminiVoiceOption[] = [
+  { id: 'Zephyr', label: 'Zephyr · Bright', displayName: 'Zephyr', description: 'Bright' },
+  { id: 'Puck', label: 'Puck · Upbeat', displayName: 'Puck', description: 'Upbeat' },
+  { id: 'Charon', label: 'Charon · Informative', displayName: 'Charon', description: 'Informative' },
+  { id: 'Kore', label: 'Kore · Firm', displayName: 'Kore', description: 'Firm' },
+  { id: 'Fenrir', label: 'Fenrir · Excitable', displayName: 'Fenrir', description: 'Excitable' },
+  { id: 'Leda', label: 'Leda · Youthful', displayName: 'Leda', description: 'Youthful' },
+  { id: 'Orus', label: 'Orus · Firm', displayName: 'Orus', description: 'Firm' },
+  { id: 'Aoede', label: 'Aoede · Breezy', displayName: 'Aoede', description: 'Breezy' },
+  { id: 'Callirrhoe', label: 'Callirrhoe · Easy-going', displayName: 'Callirrhoe', description: 'Easy-going' },
+  { id: 'Autonoe', label: 'Autonoe · Bright', displayName: 'Autonoe', description: 'Bright' },
+  { id: 'Enceladus', label: 'Enceladus · Breathy', displayName: 'Enceladus', description: 'Breathy' },
+  { id: 'Iapetus', label: 'Iapetus · Clear', displayName: 'Iapetus', description: 'Clear' },
+  { id: 'Umbriel', label: 'Umbriel · Easy-going', displayName: 'Umbriel', description: 'Easy-going' },
+  { id: 'Algieba', label: 'Algieba · Smooth', displayName: 'Algieba', description: 'Smooth' },
+  { id: 'Despina', label: 'Despina · Smooth', displayName: 'Despina', description: 'Smooth' },
+  { id: 'Erinome', label: 'Erinome · Clear', displayName: 'Erinome', description: 'Clear' },
+  { id: 'Algenib', label: 'Algenib · Gravelly', displayName: 'Algenib', description: 'Gravelly' },
+  { id: 'Rasalgethi', label: 'Rasalgethi · Informative', displayName: 'Rasalgethi', description: 'Informative' },
+  { id: 'Laomedeia', label: 'Laomedeia · Upbeat', displayName: 'Laomedeia', description: 'Upbeat' },
+  { id: 'Achernar', label: 'Achernar · Soft', displayName: 'Achernar', description: 'Soft' },
+  { id: 'Alnilam', label: 'Alnilam · Firm', displayName: 'Alnilam', description: 'Firm' },
+  { id: 'Schedar', label: 'Schedar · Even', displayName: 'Schedar', description: 'Even' },
+  { id: 'Gacrux', label: 'Gacrux · Mature', displayName: 'Gacrux', description: 'Mature' },
+  { id: 'Pulcherrima', label: 'Pulcherrima · Forward', displayName: 'Pulcherrima', description: 'Forward' },
+  { id: 'Achird', label: 'Achird · Friendly', displayName: 'Achird', description: 'Friendly' },
+  { id: 'Zubenelgenubi', label: 'Zubenelgenubi · Casual', displayName: 'Zubenelgenubi', description: 'Casual' },
+  { id: 'Vindemiatrix', label: 'Vindemiatrix · Gentle', displayName: 'Vindemiatrix', description: 'Gentle' },
+  { id: 'Sadachbia', label: 'Sadachbia · Lively', displayName: 'Sadachbia', description: 'Lively' },
+  { id: 'Sadaltager', label: 'Sadaltager · Knowledgeable', displayName: 'Sadaltager', description: 'Knowledgeable' },
+  { id: 'Sulafat', label: 'Sulafat · Warm', displayName: 'Sulafat', description: 'Warm' },
 ];
+
+export async function getGeminiVoices(customApiKey?: string): Promise<GeminiVoiceOption[]> {
+  const stored = getStoredProviderConfig();
+  const activeKey = (customApiKey || stored.apiKey || '').trim();
+  try {
+    const response = await fetch('/api/voices', {
+      headers: {
+        Accept: 'application/json',
+        'x-tts-provider': 'gemini',
+        ...(activeKey ? { 'x-api-key': activeKey } : {}),
+      },
+    });
+    if (!response.ok) return CLOUD_VOICES;
+    const payload = (await response.json()) as { voices?: Array<Partial<GeminiVoiceOption> & { id?: string; name?: string }> };
+    const voices = (payload.voices || [])
+      .map(voice => {
+        const id = String(voice.id || voice.name || '').trim();
+        if (!id) return null;
+        const displayName = String(voice.displayName || id);
+        const description = voice.description ? String(voice.description) : undefined;
+        return {
+          id,
+          displayName,
+          description,
+          label: description ? `${displayName} · ${description}` : displayName,
+          languageCode: voice.languageCode,
+          accent: voice.accent,
+          gender: voice.gender,
+          type: voice.type,
+        } as GeminiVoiceOption;
+      })
+      .filter((voice): voice is GeminiVoiceOption => Boolean(voice));
+    if (!voices.length) return CLOUD_VOICES;
+    const merged = new Map<string, GeminiVoiceOption>();
+    CLOUD_VOICES.forEach(voice => merged.set(voice.id, voice));
+    voices.forEach(voice => merged.set(voice.id, voice));
+    return Array.from(merged.values());
+  } catch {
+    return CLOUD_VOICES;
+  }
+}
 
 async function synthesizeRemoteChunk(
   text: string,
@@ -249,10 +335,10 @@ export async function synthesizeChapter(
   shouldCancel: () => boolean,
   customApiKey?: string,
   cloudVoice?: string
-): Promise<{ blob: Blob; duration: number }> {
+): Promise<{ blob: Blob; duration: number; engineVoiceId: string }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
-  let useRemote = Boolean(activeKey) || (await isRemoteTtsAvailable(false));
+  let useRemote = Boolean(activeKey) || (await isRemoteTtsAvailable(false, activeKey));
 
   if (useRemote) {
     try {
@@ -268,10 +354,18 @@ export async function synthesizeChapter(
       onProgress(100, `Audio ${providerLabel} prêt`);
       if (chunkBlob.type.includes('wav')) {
         const meta = parseWav(await chunkBlob.arrayBuffer());
-        return { blob: chunkBlob, duration: meta.data.length / meta.byteRate };
+        return {
+          blob: chunkBlob,
+          duration: meta.data.length / meta.byteRate,
+          engineVoiceId: `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`,
+        };
       }
       const estimatedDuration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
-      return { blob: chunkBlob, duration: estimatedDuration };
+      return {
+        blob: chunkBlob,
+        duration: estimatedDuration,
+        engineVoiceId: `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`,
+      };
     } catch (remoteError: any) {
       console.error('TTS distant erreur:', remoteError);
       if (activeKey) {
@@ -324,7 +418,8 @@ export async function synthesizeChapter(
       );
       blobs.push(wav);
     }
-    return mergeWavBlobs(blobs);
+    const merged = await mergeWavBlobs(blobs);
+    return { ...merged, engineVoiceId: `piper:${effectiveVoiceId}` };
   } catch (piperErr: any) {
     console.error('Erreur Piper local:', piperErr);
     throw new Error(
