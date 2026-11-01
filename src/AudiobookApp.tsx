@@ -928,48 +928,37 @@ export default function AudiobookApp() {
   async function playSummaryWithIA(summaryText: string): Promise<void> {
     if (!summaryText) return;
     stopAllPlayback();
-    showToast('Synthèse vocale IA pour le résumé...');
+    const clean = summaryText.replace(/###|---|\*\*|⚡|📖|🧠|👥|💡|🔗|🎯/g, ' ').trim();
+    setGeneration({ active: true, progress: 0, label: 'Lecture du résumé IA', mode: 'chapter' });
     try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
-          ...(settings.apiSecret ? { 'x-api-secret': settings.apiSecret } : {}),
-          'x-tts-provider': settings.ttsProvider || 'gemini',
-          ...(settings.awsRegion ? { 'x-aws-region': settings.awsRegion } : {}),
-        },
-        body: JSON.stringify({
-          text: summaryText.replace(/###|---|\*\*|⚡|📖|🧠|👥|💡|🔗|🎯/g, ' ').slice(0, 15000),
-          voice: settings.cloudVoice || 'Kore',
-        }),
-      });
-      if (!res.ok) throw new Error('Échec synthèse résumé');
-      const data = await res.json();
-      const clean = data.audio.includes(',') ? data.audio.slice(data.audio.indexOf(',') + 1) : data.audio;
-      const binary = atob(clean);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const blob = new Blob([bytes], { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
+      // Génération par petits segments : fiable avec les limites d'exécution Netlify.
+      const result = await synthesizeChapter(
+        clean,
+        settings.voiceId,
+        (progress, label) => setGeneration({ active: true, progress, label, mode: 'chapter' }),
+        () => false,
+        settings.apiKey,
+        settings.cloudVoice
+      );
+      const url = URL.createObjectURL(result.blob);
       if (audioRef.current) {
         audioRef.current.src = url;
         audioRef.current.currentTime = 0;
-        void audioRef.current.play();
+        await audioRef.current.play();
         setAudioPlaying(true);
         showToast('Lecture du résumé IA lancée');
       }
     } catch (err: any) {
-      showToast(err?.message || 'Erreur lecture résumé', true);
+      showToast(err?.message || 'Erreur de lecture du résumé', true);
+    } finally {
+      setGeneration(null);
     }
   }
 
   async function testApiKey(): Promise<void> {
     const key = (settings.apiKey || '').trim();
-    if (!key) {
-      showToast('Veuillez saisir votre clé API d’abord.', true);
-      return;
-    }
+    // Une clé saisie dans le navigateur est facultative :
+    // sur Netlify elle peut être stockée côté serveur dans Environment variables.
     setKeyTestStatus('testing');
     setKeyTestError(null);
     try {
@@ -986,8 +975,8 @@ export default function AudiobookApp() {
       const data = await res.json();
       if (res.ok && data.ok) {
         setKeyTestStatus('valid');
-        localStorage.setItem('auralis_api_key', key);
-        if ((settings.ttsProvider || 'gemini') === 'gemini') {
+        if (key) localStorage.setItem('auralis_api_key', key);
+        if (key && (settings.ttsProvider || 'gemini') === 'gemini') {
           localStorage.setItem('auralis_gemini_api_key', key);
           void refreshGeminiVoiceData();
         }
@@ -2498,7 +2487,7 @@ export default function AudiobookApp() {
               </label>
             </div>
             <div className="lv-field">
-              <label htmlFor="tts-provider">Fournisseur IA</label>
+              <label htmlFor="tts-provider">Fournisseur IA (clé côté Netlify ou facultativement ici)</label>
               <select
                 id="tts-provider"
                 className="lv-select"
@@ -2563,7 +2552,7 @@ export default function AudiobookApp() {
                 className="lv-secondary"
                 style={{ width: 'auto', whiteSpace: 'nowrap', marginTop: 8 }}
                 onClick={() => void testApiKey()}
-                disabled={!settings.apiKey?.trim() || keyTestStatus === 'testing' || ((settings.ttsProvider || 'gemini') === 'aws-polly' && !settings.apiSecret?.trim())}
+                disabled={keyTestStatus === 'testing'}
               >
                 {keyTestStatus === 'testing' ? 'Test...' : 'Tester la connexion'}
               </button>
@@ -2579,7 +2568,7 @@ export default function AudiobookApp() {
                 </p>
               )}
               <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                Les identifiants sont conservés dans ce navigateur et envoyés uniquement au backend LivreVox pour appeler le fournisseur choisi.
+                Recommandé : configure la clé dans Netlify → Project configuration → Environment variables (scope Functions). Le champ ci-dessus est facultatif ; aucun secret du serveur n’est envoyé au navigateur.
               </p>
             </div>
             <div className="lv-modal-actions">
