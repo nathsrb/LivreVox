@@ -326,7 +326,8 @@ function classifyError(error: unknown) {
 }
 
 export default async function handler(request: Request): Promise<Response> {
-  const path = new URL(request.url).pathname;
+  const route = new URL(request.url).searchParams.get('route') || '';
+  const path = '/api/' + route.replace(/^\/+/, '');
   const method = request.method.toUpperCase();
   if (method === 'OPTIONS') return new Response(null, {status: 204});
   if (path === '/api/health' || path === '/api/cloud/capabilities') {
@@ -502,6 +503,5 @@ ${chapterText.slice(0, 48000)}`;
   return respond({error:'Route API non migrée.'},404);
 }
 export const config = {
-  path: '/api/*',
   rateLimit: { action:'rate_limit', aggregateBy:['ip'],windowSize:60,windowLimit:90 }
 };
