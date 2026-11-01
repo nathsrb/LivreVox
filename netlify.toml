@@ -1,0 +1,32 @@
+# Auralis / LivreVox — déploiement Netlify
+# Toutes les clés d'API doivent être configurées dans Netlify (Environment variables, scope Functions).
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Conserver exactement la route demandée pour le handler serverless.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api?route=:splat"
+  status = 200
+  force = true
+
+# Navigation React : rafraîchir une page garde l'application.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "credentialless"
+    X-Content-Type-Options = "nosniff"
