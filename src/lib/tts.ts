@@ -251,7 +251,7 @@ async function synthesizeRemoteChunk(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Accept: 'application/json',
+      Accept: 'audio/wav, audio/mpeg, application/json',
       'x-tts-provider': stored.provider,
       ...(activeKey ? { 'x-api-key': activeKey } : {}),
       ...(stored.apiSecret ? { 'x-api-secret': stored.apiSecret } : {}),
@@ -266,6 +266,12 @@ async function synthesizeRemoteChunk(
       voice: cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore'),
     }),
   });
+  // Netlify renvoie un flux audio binaire : pas de base64 JSON ni de limite de 6 Mo.
+  // La branche JSON est conservée pour la compatibilité avec l'ancien serveur.
+  const contentType = response.headers.get('content-type') || '';
+  if (response.ok && contentType.toLowerCase().startsWith('audio/')) {
+    return response.blob();
+  }
   let payload: RemoteTtsResponse = {};
   try {
     payload = (await response.json()) as RemoteTtsResponse;
@@ -349,7 +355,7 @@ export async function synthesizeChapter(
           : stored.provider === 'aws-polly'
             ? 'Amazon Polly'
             : 'Gemini';
-      const remoteChunks = chunkForSpeech(text, 280);
+      const remoteChunks = chunkForSpeech(text, 500);
       const remoteBlobs: Blob[] = [];
       for (let index = 0; index < remoteChunks.length; index += 1) {
         if (shouldCancel()) throw new Error('Génération annulée.');
