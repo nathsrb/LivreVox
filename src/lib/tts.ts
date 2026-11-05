@@ -144,6 +144,7 @@ export async function isRemoteTtsAvailable(
   customApiKey?: string
 ): Promise<boolean> {
   const stored = getStoredProviderConfig();
+  if (stored.provider === 'piper') return false;
   const activeKey = (customApiKey || stored.apiKey || '').trim();
   if (!force && !activeKey && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
     return remoteCapabilityCache.value;
@@ -279,6 +280,11 @@ async function synthesizeRemoteChunk(
     // Le message HTTP ci-dessous reste suffisamment explicite.
   }
   if (!response.ok || !payload.audio) {
+    if (response.status === 429) {
+      throw new Error(
+        'Limite de génération IA atteinte (HTTP 429). La voix locale ne remplace pas Gemini. Réessaie plus tard ou utilise explicitement le mode Piper.'
+      );
+    }
     if (response.status === 401 || response.status === 403) {
       throw new Error(
         'Accès à la prévisualisation Netlify refusé (HTTP ' + response.status +
@@ -350,9 +356,15 @@ export async function synthesizeChapter(
 ): Promise<{ blob: Blob; duration: number; engineVoiceId: string }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
-  let useRemote = Boolean(activeKey) || (await isRemoteTtsAvailable(false, activeKey));
+  const useRemote = stored.provider !== 'piper';
 
   if (useRemote) {
+    const available = Boolean(activeKey) || (await isRemoteTtsAvailable(false, activeKey));
+    if (!available) {
+      throw new Error(
+        'Le fournisseur IA ' + stored.provider + ' est indisponible. Vérifie les variables API sur Netlify ; Auralis ne passera pas automatiquement en voix locale.'
+      );
+    }
     try {
       if (shouldCancel()) throw new Error('Génération annulée.');
       const providerLabel =
@@ -396,16 +408,12 @@ export async function synthesizeChapter(
     } catch (remoteError: any) {
       console.error('TTS distant erreur:', remoteError);
       const reason = remoteError instanceof Error ? remoteError.message : String(remoteError);
-      // A protected preview can reject both API requests and Piper code chunks.
-      // Do not replace this actionable error with a misleading Piper fallback.
-      if (activeKey || /HTTP (401|403)|Accès à la prévisualisation/i.test(reason)) {
-        throw new Error(reason || 'Échec de la génération vocale distante.');
-      }
-      useRemote = false;
+      // Never silently substitute a local voice for a selected cloud provider.
+      throw new Error(reason || 'Échec de la génération vocale distante.');
     }
   }
 
-  // Secours Piper TTS local
+  // Piper is only used when explicitly chosen in the provider settings.
   const chunks = chunkForSpeech(text);
   const blobs: Blob[] = [];
   try {
