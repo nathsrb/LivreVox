@@ -76,6 +76,10 @@ import {
   type GeminiVoiceOption,
 } from './lib/tts';
 
+const KOKORO_VOICES: GeminiVoiceOption[] = [
+  { id: 'ff_siwis', label: 'Siwis · Français (Kokoro)', displayName: 'Siwis' },
+];
+
 const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
   cloudVoice: 'Kore',
@@ -1075,7 +1079,7 @@ export default function AudiobookApp() {
     const provider = settings.ttsProvider || 'gemini';
     const defaultCloudVoice =
       provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
-    const expectedVoiceId = `${provider}:${settings.cloudVoice || defaultCloudVoice}`;
+    const expectedVoiceId = `${provider}:${provider === 'deepinfra' && settings.cloudVoice === 'Kore' ? defaultCloudVoice : settings.cloudVoice || defaultCloudVoice}`;
     let completed = 0;
     for (let index = 0; index < selectedBook.chapters.length; index += 1) {
       if (cancelGeneration.current) break;
@@ -2132,15 +2136,15 @@ export default function AudiobookApp() {
               <label htmlFor="cloud-voice">
                 {(settings.ttsProvider || 'gemini') === 'gemini'
                   ? 'Voix Gemini'
-                  : 'Voix Cloud'}
+                  : (settings.ttsProvider === 'deepinfra' ? 'Voix Kokoro · DeepInfra' : 'Voix Cloud')}
               </label>
               <details style={{ position: 'relative', width: '100%' }}>
                 <summary
                   className="lv-select"
-                  aria-label="Choisir une voix Gemini"
+                  aria-label="Choisir une voix de synthèse"
                   style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
                 >
-                  <span>{((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : CLOUD_VOICES)
+                  <span>{((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : settings.ttsProvider === 'deepinfra' ? KOKORO_VOICES : [{ id: 'Lea', label: 'Léa · Français (Polly)', displayName: 'Léa' }])
                     .find(voice => voice.id === (settings.cloudVoice || 'Kore'))?.label || settings.cloudVoice || 'Kore'}</span>
                   <ChevronRight size={16} style={{ transform: 'rotate(90deg)', flexShrink: 0 }} />
                 </summary>
@@ -2159,7 +2163,7 @@ export default function AudiobookApp() {
                     boxShadow: '0 12px 28px rgba(0,0,0,.35)',
                   }}
                 >
-                  {((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : CLOUD_VOICES).map(voice => (
+                  {((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : settings.ttsProvider === 'deepinfra' ? KOKORO_VOICES : [{ id: 'Lea', label: 'Léa · Français (Polly)', displayName: 'Léa' }]).map(voice => (
                     <button
                       type="button"
                       role="option"
@@ -2263,7 +2267,7 @@ export default function AudiobookApp() {
                 value={settings.ttsProvider || 'gemini'}
                 onChange={event => {
                   const provider = event.target.value as AppSettings['ttsProvider'];
-                  setSettings(current => ({ ...current, ttsProvider: provider }));
+                  setSettings(current => ({ ...current, ttsProvider: provider, cloudVoice: provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore', apiKey: '' }));
                   setKeyTestStatus('idle');
                   setKeyTestError(null);
                 }}
