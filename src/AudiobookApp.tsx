@@ -2755,6 +2755,20 @@ export default function AudiobookApp() {
                   <SkipForward size={20} />
                 </button>
               </div>
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '12px', marginTop: '16px', flexWrap: 'wrap' }}>
+                <label htmlFor="immersive-playback-speed" style={{ color: '#cbd5e1', fontSize: '13px' }}>Vitesse de lecture</label>
+                <select
+                  id="immersive-playback-speed"
+                  aria-label="Accélérer ou ralentir la lecture"
+                  className="lv-rate"
+                  value={settings.rate}
+                  onChange={event => updateRate(Number(event.target.value))}
+                >
+                  {SPEEDS.map(rate => (
+                    <option key={rate} value={rate}>{rate}×</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="lv-immersive-reader">
