@@ -82,8 +82,8 @@ const KOKORO_VOICES: GeminiVoiceOption[] = [
 
 const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
-  cloudVoice: 'Kore',
-  ttsProvider: 'gemini',
+  cloudVoice: 'ff_siwis',
+  ttsProvider: 'deepinfra',
   apiKey: '',
   apiSecret: '',
   awsRegion: 'eu-west-3',
@@ -131,13 +131,20 @@ function loadSettings(): AppSettings {
     const parsedA = rawA ? (JSON.parse(rawA) as Partial<AppSettings>) : {};
     const parsedL = rawL ? (JSON.parse(rawL) as Partial<AppSettings>) : {};
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsedL, ...parsedA };
-    if (directKey && directKey.trim() && !merged.apiKey) {
+    if (false && directKey && directKey.trim() && !merged.apiKey) {
       merged.apiKey = directKey.trim();
       merged.geminiApiKey = directKey.trim();
     }
     const savedRate = localStorage.getItem('auralis_playback_rate');
     if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
-    if ((merged.ttsProvider as string) === 'piper') merged.ttsProvider = 'gemini';
+    // Kokoro/DeepInfra is the only speech-generation provider in this preview.
+    // Retain an existing DeepInfra key, but do not reuse a legacy Google key.
+    if (merged.ttsProvider !== 'deepinfra') {
+      merged.ttsProvider = 'deepinfra';
+      merged.cloudVoice = 'ff_siwis';
+      merged.apiKey = '';
+    }
+    if (merged.cloudVoice !== 'ff_siwis') merged.cloudVoice = 'ff_siwis';
     // Don't persist obsolete local voice identifiers from older app versions.
     delete (merged as unknown as Record<string, unknown>).voiceId;
     delete (merged as unknown as Record<string, unknown>).systemVoiceUri;
@@ -2246,9 +2253,7 @@ export default function AudiobookApp() {
                   setKeyTestError(null);
                 }}
               >
-                <option value="deepinfra">DeepInfra · Kokoro (économique)</option>
-                <option value="gemini">Google IA · Gemini (serveur)</option>
-                <option value="aws-polly">Amazon Polly</option>
+                <option value="deepinfra">Kokoro · DeepInfra (voix IA cloud)</option>
               </select>
             </div>
 
