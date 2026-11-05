@@ -144,6 +144,47 @@ export async function renderPdfPageImage(
 }
 
 /**
+ * Recognize chapter numbers printed as "– 1 –" / "– 2 –" at the start
+ * of a page. These are real chapter markers, not technical audio chunks.
+ */
+function sectionsFromPrintedChapterNumbers(
+  pages: string[]
+): Array<{ title: string; text: string }> | undefined {
+  type Candidate = { number: number; page: number; title: string };
+  const found: Candidate[] = [];
+  for (let page = 0; page < pages.length; page++) {
+    const start = (pages[page] || '').slice(0, 850);
+    const match = /[–—-]\s*(\d{1,2})\s*[–—-]/.exec(start);
+    if (!match || match.index > 160) continue;
+    const number = Number(match[1]);
+    if (number < 1 || number > 60) continue;
+    const remainder = start.slice(match.index + match[0].length).trim();
+    let title = remainder.split('\n').find(Boolean)?.trim() || '';
+    title = title.replace(/\s+/g, ' ').trim();
+    if (title.length < 4 || title.length > 100) title = 'Chapitre ' + number;
+    found.push({ number, page, title });
+  }
+
+  // Accept only a consecutive sequence beginning at 1, on separate pages.
+  const numbered: Candidate[] = [];
+  for (const item of found) {
+    if (item.number !== numbered.length + 1) continue;
+    if (numbered.length && item.page - numbered[numbered.length - 1].page < 2) continue;
+    numbered.push(item);
+  }
+  if (numbered.length < 3 || numbered.length > 50) return undefined;
+
+  const chapters: Array<{ title: string; text: string }> = [];
+  for (let i = 0; i < numbered.length; i++) {
+    const current = numbered[i];
+    const until = numbered[i + 1]?.page ?? pages.length;
+    const body = pages.slice(current.page, until).join('\n\n').trim();
+    if (body.length >= 250) chapters.push({ title: current.title, text: body });
+  }
+  return chapters.length === numbered.length ? chapters : undefined;
+}
+
+/**
  * Recover actual chapter boundaries from a PDF's built-in bookmarks.
  * PDF bookmarks are author metadata, unlike arbitrary reading-size chunks.
  * Reject suspicious outlines containing every page/paragraph.
@@ -262,7 +303,10 @@ export async function extractPdf(
       progress: 95,
     });
 
-    const outlineChapters = await sectionsFromOutline(pdfDocument, pageTexts);
+    // Printed chapter markers take priority over bookmark collections.
+    const outlineChapters =
+      sectionsFromPrintedChapterNumbers(pageTexts) ??
+      await sectionsFromOutline(pdfDocument, pageTexts);
     return {
       text: pageTexts.join('\n\n'),
       pages: pdfDocument.numPages,
