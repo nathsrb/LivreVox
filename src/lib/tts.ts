@@ -279,6 +279,12 @@ async function synthesizeRemoteChunk(
     // Le message HTTP ci-dessous reste suffisamment explicite.
   }
   if (!response.ok || !payload.audio) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        'Accès à la prévisualisation Netlify refusé (HTTP ' + response.status +
+        '). Recharge la page. Si le problème persiste, vérifie la protection d’accès Netlify.'
+      );
+    }
     throw new Error(
       payload.error || `La synthèse vocale distante a échoué (${response.status}).`
     );
@@ -389,11 +395,11 @@ export async function synthesizeChapter(
       };
     } catch (remoteError: any) {
       console.error('TTS distant erreur:', remoteError);
-      if (activeKey) {
-        throw new Error(
-          remoteError?.message ||
-            'Échec de la génération vocale distante. Vérifiez le fournisseur et les identifiants API.'
-        );
+      const reason = remoteError instanceof Error ? remoteError.message : String(remoteError);
+      // A protected preview can reject both API requests and Piper code chunks.
+      // Do not replace this actionable error with a misleading Piper fallback.
+      if (activeKey || /HTTP (401|403)|Accès à la prévisualisation/i.test(reason)) {
+        throw new Error(reason || 'Échec de la génération vocale distante.');
       }
       useRemote = false;
     }
@@ -443,8 +449,10 @@ export async function synthesizeChapter(
     return { ...merged, engineVoiceId: `piper:${effectiveVoiceId}` };
   } catch (piperErr: any) {
     console.error('Erreur Piper local:', piperErr);
+    const detail = piperErr instanceof Error ? piperErr.message : String(piperErr);
     throw new Error(
-      "Impossible de générer l’audio distant ni avec Piper local. Vérifiez votre connexion ou vos réglages API."
+      'Piper local indisponible : ' + (detail || 'erreur inconnue') +
+      '. Pour utiliser Gemini, sélectionne Google IA et vérifie que la connexion API est accessible.'
     );
   }
 }
