@@ -83,13 +83,15 @@ export function splitIntoChapters(text: string, outlined?: PdfChapterSection[]):
     if (headings.length < 2 || headings.length > maxDetected) return false;
     const gaps = headings.slice(1).map((h, i) => h.offset - headings[i].offset);
     const crowded = gaps.filter(gap => gap < 1600).length;
-    if (crowded > Math.max(1, Math.floor(gaps.length * 0.15))) return false;
-    return source.length / headings.length >= 6500;
+    if (source.length >= 40000 && crowded > Math.max(1, Math.floor(gaps.length * 0.15))) return false;
+    return source.length / headings.length >= (source.length < 40000 ? 250 : 6500);
   }
 
   // Ignore the table of contents, which often repeats every chapter title in
   // quick succession near the start of the book.
-  const afterContents = candidates.filter(h => h.offset >= Math.min(65000, source.length * 0.045));
+  const afterContents = source.length < 40000
+    ? candidates
+    : candidates.filter(h => h.offset >= Math.min(65000, source.length * 0.045));
   const structural = afterContents.filter(h => h.kind === 'structural');
   const numbered = afterContents.filter(h => h.kind === 'numbered');
   const headings = isPlausible(structural)
