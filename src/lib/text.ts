@@ -47,40 +47,26 @@ function headingKind(raw: string): HeadingKind | null {
   return null;
 }
 
-function smartBlocks(text: string, targetChars = 14000): string[] {
-  // Fallback sections have a bounded size, even if PDF extraction produces
-  // huge paragraphs with no blank lines. This avoids enormous WAV buffers.
-  const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
-  const blocks: string[] = [];
-  let current = '';
+export type PdfChapterSection = {
+  title: string;
+  text: string;
+};
 
-  function flush() {
-    if (current.trim()) blocks.push(current.trim());
-    current = '';
-  }
-
-  for (const paragraph of paragraphs) {
-    let remaining = paragraph;
-    while (remaining.length > targetChars) {
-      flush();
-      let cut = remaining.lastIndexOf('. ', targetChars);
-      if (cut < targetChars / 2) cut = remaining.lastIndexOf(' ', targetChars);
-      if (cut < targetChars / 2) cut = targetChars;
-      const first = remaining.slice(0, cut).trim();
-      if (first) blocks.push(first);
-      remaining = remaining.slice(cut).trim();
-    }
-    if (!remaining) continue;
-    if (current && current.length + remaining.length + 2 > targetChars) flush();
-    current += `${current ? '\n\n' : ''}${remaining}`;
-  }
-  flush();
-  return blocks;
-}
-
-export function splitIntoChapters(text: string): Chapter[] {
+/**
+ * Returns *real* chapters only. The 500-character chunks used by Gemini TTS
+ * are a separate implementation detail; never expose them as book chapters.
+ */
+export function splitIntoChapters(text: string, outlined?: PdfChapterSection[]): Chapter[] {
   const source = text.trim();
   if (!source) return [];
+
+  // Prefer the document's own PDF bookmarks when they identify chapter pages.
+  // Don't split genuine chapters just because the audio generator has a smaller
+  // technical limit.
+  const trusted = (outlined || []).filter(section => section.text.trim().length >= 200);
+  if (trusted.length >= 2 && trusted.length <= 60) {
+    return trusted.map((section, index) => makeChapter(section.title, section.text, index));
+  }
 
   const lines = source.split('\n');
   const candidates: Array<{ index: number; title: string; kind: HeadingKind; offset: number }> = [];
@@ -92,21 +78,20 @@ export function splitIntoChapters(text: string): Chapter[] {
     offset += line.length + 1;
   });
 
-  // A normal book should not have hundreds of structural headings. If PDF
-  // noise generates hundreds of candidates, reject them and group paragraphs
-  // into balanced, meaningful reading sections instead.
-  const maxDetected = Math.min(90, Math.max(8, Math.floor(source.length / 4000)));
-
+  const maxDetected = Math.min(45, Math.max(6, Math.floor(source.length / 9000)));
   function isPlausible(headings: typeof candidates): boolean {
     if (headings.length < 2 || headings.length > maxDetected) return false;
     const gaps = headings.slice(1).map((h, i) => h.offset - headings[i].offset);
-    const crowded = gaps.filter(gap => gap < 1300).length;
-    if (crowded > Math.max(1, Math.floor(gaps.length * 0.2))) return false;
-    return source.length / headings.length >= 3500;
+    const crowded = gaps.filter(gap => gap < 1600).length;
+    if (crowded > Math.max(1, Math.floor(gaps.length * 0.15))) return false;
+    return source.length / headings.length >= 6500;
   }
 
-  const structural = candidates.filter(h => h.kind === 'structural');
-  const numbered = candidates.filter(h => h.kind === 'numbered');
+  // Ignore the table of contents, which often repeats every chapter title in
+  // quick succession near the start of the book.
+  const afterContents = candidates.filter(h => h.offset >= Math.min(65000, source.length * 0.045));
+  const structural = afterContents.filter(h => h.kind === 'structural');
+  const numbered = afterContents.filter(h => h.kind === 'numbered');
   const headings = isPlausible(structural)
     ? structural
     : isPlausible(numbered)
@@ -116,28 +101,22 @@ export function splitIntoChapters(text: string): Chapter[] {
   if (headings.length) {
     const chapters: Chapter[] = [];
     const intro = lines.slice(0, headings[0].index).join('\n').trim();
-    if (intro.length >= 500) {
-      smartBlocks(intro).forEach((part, i) =>
-        chapters.push(makeChapter(i ? `Ouverture · partie ${i + 1}` : 'Ouverture', part, chapters.length))
-      );
-    }
+    if (intro.length >= 500) chapters.push(makeChapter('Pages préliminaires', intro, chapters.length));
 
     headings.forEach((heading, headingIndex) => {
       const end = headings[headingIndex + 1]?.index ?? lines.length;
       const body = lines.slice(heading.index + 1, end).join('\n').trim();
-      if (body.length < 250) return;
-      smartBlocks(body).forEach((part, partIndex) => {
-        const name = partIndex ? `${heading.title} · partie ${partIndex + 1}` : heading.title;
-        chapters.push(makeChapter(name, part, chapters.length));
-      });
+      if (body.length >= 250) {
+        chapters.push(makeChapter(heading.title, body, chapters.length));
+      }
     });
     if (chapters.length >= 2) return chapters;
   }
 
-  // Clearly label fallback divisions as audio parts, not original chapters.
-  return smartBlocks(source).map((part, index) =>
-    makeChapter(`Partie audio ${index + 1}`, part, index)
-  );
+  // Do not fabricate "85 chapters" from 14k-character audio chunks.
+  // Preserve the full text and be transparent when original chapter boundaries
+  // cannot be established confidently.
+  return [makeChapter('Texte intégral — chapitres non détectés', source, 0)];
 }
 
 export function chunkForSpeech(text: string, maxChars = 650): string[] {
