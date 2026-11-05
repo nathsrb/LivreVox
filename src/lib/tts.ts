@@ -2,12 +2,6 @@ import { zipSync } from 'fflate';
 import { chunkForSpeech, sanitizeFileName } from './text';
 import { getStoredProviderConfig } from './cloud';
 
-export type VoiceCatalogItem = {
-  id: string;
-  label: string;
-  language: string;
-};
-
 export type GeminiVoiceOption = {
   id: string;
   label: string;
@@ -144,7 +138,6 @@ export async function isRemoteTtsAvailable(
   customApiKey?: string
 ): Promise<boolean> {
   const stored = getStoredProviderConfig();
-  if (stored.provider === 'piper') return false;
   const activeKey = (customApiKey || stored.apiKey || '').trim();
   if (!force && !activeKey && remoteCapabilityCache && remoteCapabilityCache.expiresAt > Date.now())
     return remoteCapabilityCache.value;
@@ -282,7 +275,7 @@ async function synthesizeRemoteChunk(
   if (!response.ok || !payload.audio) {
     if (response.status === 429) {
       throw new Error(
-        'Limite de génération IA atteinte (HTTP 429). La voix locale ne remplace pas Gemini. Réessaie plus tard ou utilise explicitement le mode Piper.'
+        'Limite de génération IA atteinte (HTTP 429). Réessaie plus tard.'
       );
     }
     if (response.status === 401 || response.status === 403) {
@@ -298,57 +291,11 @@ async function synthesizeRemoteChunk(
   return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
 }
 
-export async function getVoiceCatalog(): Promise<VoiceCatalogItem[]> {
-  const piper = await import('@mintplex-labs/piper-tts-web');
-  const raw = await piper.voices();
-  return Object.keys(raw)
-    .filter(id => /^(fr_|en_|es_)/i.test(id))
-    .sort((a, b) => a.localeCompare(b))
-    .map(id => {
-      const language = id.startsWith('fr_')
-        ? 'Français'
-        : id.startsWith('es_')
-          ? 'Espagnol'
-          : 'Anglais';
-      const label = id.replace(/_/g, ' ').replace(/-/g, ' · ');
-      return { id, label, language };
-    });
-}
-
-export async function getStoredVoices(): Promise<string[]> {
-  try {
-    const piper = await import('@mintplex-labs/piper-tts-web');
-    return await piper.stored();
-  } catch {
-    return [];
-  }
-}
-
-export async function downloadVoice(
-  voiceId: string,
-  onProgress: (value: number) => void
-): Promise<void> {
-  const piper = await import('@mintplex-labs/piper-tts-web');
-  await piper.download(voiceId, progress => {
-    if (progress.loaded !== undefined && progress.total)
-      onProgress(
-        Math.max(
-          0,
-          Math.min(100, Math.round((progress.loaded / progress.total) * 100))
-        )
-      );
-  });
-  onProgress(100);
-}
-
-export async function removeVoice(voiceId: string): Promise<void> {
-  const piper = await import('@mintplex-labs/piper-tts-web');
-  await piper.remove(voiceId);
-}
-
+/**
+ * Cloud-only audiobook rendering: the app never invokes a local TTS engine.
+ */
 export async function synthesizeChapter(
   text: string,
-  voiceId: string,
   onProgress: (value: number, label: string) => void,
   shouldCancel: () => boolean,
   customApiKey?: string,
@@ -356,113 +303,42 @@ export async function synthesizeChapter(
 ): Promise<{ blob: Blob; duration: number; engineVoiceId: string }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
-  const useRemote = stored.provider !== 'piper';
-
-  if (useRemote) {
-    const available = Boolean(activeKey) || (await isRemoteTtsAvailable(false, activeKey));
-    if (!available) {
-      throw new Error(
-        'Le fournisseur IA ' + stored.provider + ' est indisponible. Vérifie les variables API sur Netlify ; Auralis ne passera pas automatiquement en voix locale.'
-      );
-    }
-    try {
-      if (shouldCancel()) throw new Error('Génération annulée.');
-      const providerLabel =
-        stored.provider === 'deepinfra'
-          ? 'DeepInfra · Kokoro'
-          : stored.provider === 'aws-polly'
-            ? 'Amazon Polly'
-            : 'Gemini';
-      const remoteChunks = chunkForSpeech(text, 500);
-      const remoteBlobs: Blob[] = [];
-      for (let index = 0; index < remoteChunks.length; index += 1) {
-        if (shouldCancel()) throw new Error('Génération annulée.');
-        onProgress(
-          Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82),
-          `${providerLabel} · segment ${index + 1}/${remoteChunks.length}`
-        );
-        remoteBlobs.push(
-          await synthesizeRemoteChunk(remoteChunks[index], activeKey, cloudVoice)
-        );
-      }
-      onProgress(96, `Assemblage du chapitre audio · ${providerLabel}`);
-      const engineVoiceId = `${stored.provider || 'gemini'}:${cloudVoice || (stored.provider === 'deepinfra' ? 'ff_siwis' : stored.provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
-
-      if (remoteBlobs.every(blob => blob.type.includes('wav'))) {
-        const merged = await mergeWavBlobs(remoteBlobs);
-        onProgress(100, `Audio ${providerLabel} prêt`);
-        return { ...merged, engineVoiceId };
-      }
-
-      const combinedBlob = new Blob(remoteBlobs, {
-        type: remoteBlobs[0]?.type || 'audio/mpeg',
-      });
-      const estimatedDuration =
-        Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
-      onProgress(100, `Audio ${providerLabel} prêt`);
-      return {
-        blob: combinedBlob,
-        duration: estimatedDuration,
-        engineVoiceId,
-      };
-    } catch (remoteError: any) {
-      console.error('TTS distant erreur:', remoteError);
-      const reason = remoteError instanceof Error ? remoteError.message : String(remoteError);
-      // Never silently substitute a local voice for a selected cloud provider.
-      throw new Error(reason || 'Échec de la génération vocale distante.');
-    }
+  const provider = stored.provider;
+  const available = Boolean(activeKey) || await isRemoteTtsAvailable(false, activeKey);
+  if (!available) {
+    throw new Error('Le service ' + provider + ' est indisponible sur Netlify. Vérifie sa configuration.');
   }
-
-  // Piper is only used when explicitly chosen in the provider settings.
-  const chunks = chunkForSpeech(text);
-  const blobs: Blob[] = [];
-  try {
-    const piper = await import('@mintplex-labs/piper-tts-web');
-    const stored = await piper.stored();
-    const effectiveVoiceId = stored.includes(voiceId) ? voiceId : (stored[0] || voiceId);
-    if (!stored.includes(effectiveVoiceId)) {
-      onProgress(10, `Téléchargement de la voix locale (${effectiveVoiceId})...`);
-      await piper.download(effectiveVoiceId, progress => {
-        if (progress.loaded !== undefined && progress.total) {
-          const downloadPart = progress.loaded / progress.total;
-          onProgress(
-            Math.round(10 + downloadPart * 30),
-            `Téléchargement voix locale · ${Math.round(downloadPart * 100)} %`
-          );
-        }
-      });
-    }
-
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (shouldCancel()) throw new Error('Génération annulée.');
-      onProgress(
-        Math.round(40 + (index / chunks.length) * 55),
-        `Synthèse locale Piper · segment ${index + 1}/${chunks.length}`
-      );
-      const wav = await piper.predict(
-        { text: chunks[index], voiceId: effectiveVoiceId },
-        progress => {
-          if (progress.loaded !== undefined && progress.total) {
-            const part = progress.loaded / progress.total;
-            onProgress(
-              Math.round(40 + ((index + part) / chunks.length) * 55),
-              `Synthèse vocale locale · ${Math.round(part * 100)} %`
-            );
-          }
-        }
-      );
-      blobs.push(wav);
-    }
-    const merged = await mergeWavBlobs(blobs);
-    return { ...merged, engineVoiceId: `piper:${effectiveVoiceId}` };
-  } catch (piperErr: any) {
-    console.error('Erreur Piper local:', piperErr);
-    const detail = piperErr instanceof Error ? piperErr.message : String(piperErr);
-    throw new Error(
-      'Piper local indisponible : ' + (detail || 'erreur inconnue') +
-      '. Pour utiliser Gemini, sélectionne Google IA et vérifie que la connexion API est accessible.'
+  if (shouldCancel()) throw new Error('Génération annulée.');
+  const providerLabel = provider === 'deepinfra'
+    ? 'DeepInfra · Kokoro'
+    : provider === 'aws-polly'
+      ? 'Amazon Polly'
+      : 'Gemini';
+  const remoteChunks = chunkForSpeech(text, 500);
+  const remoteBlobs: Blob[] = [];
+  for (let index = 0; index < remoteChunks.length; index += 1) {
+    if (shouldCancel()) throw new Error('Génération annulée.');
+    onProgress(
+      Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82),
+      `${providerLabel} · segment ${index + 1}/${remoteChunks.length}`
+    );
+    remoteBlobs.push(
+      await synthesizeRemoteChunk(remoteChunks[index], activeKey, cloudVoice)
     );
   }
+  onProgress(96, `Assemblage du chapitre audio · ${providerLabel}`);
+  const engineVoiceId = `${provider}:${cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
+  if (remoteBlobs.every(blob => blob.type.includes('wav'))) {
+    const merged = await mergeWavBlobs(remoteBlobs);
+    onProgress(100, `Audio ${providerLabel} prêt`);
+    return { ...merged, engineVoiceId };
+  }
+  const combinedBlob = new Blob(remoteBlobs, {
+    type: remoteBlobs[0]?.type || 'audio/mpeg',
+  });
+  const estimatedDuration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
+  onProgress(100, `Audio ${providerLabel} prêt`);
+  return { blob: combinedBlob, duration: estimatedDuration, engineVoiceId };
 }
 
 export async function makeBookZip(
