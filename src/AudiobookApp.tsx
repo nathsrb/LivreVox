@@ -68,27 +68,20 @@ import {
 } from './lib/storage';
 import {
   CLOUD_VOICES,
-  downloadVoice,
   getGeminiVoices,
-  getStoredVoices,
-  getVoiceCatalog,
   isRemoteTtsAvailable,
   makeBookZip,
-  removeVoice,
   synthesizeChapter,
   type GeminiVoiceOption,
-  type VoiceCatalogItem,
 } from './lib/tts';
 
 const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
-  voiceId: 'fr_FR-siwis-medium',
   cloudVoice: 'Kore',
   ttsProvider: 'gemini',
   apiKey: '',
   apiSecret: '',
   awsRegion: 'eu-west-3',
-  systemVoiceUri: '',
   ocrLang: 'fra+eng',
   autoOcr: true,
 };
@@ -139,6 +132,7 @@ function loadSettings(): AppSettings {
     }
     const savedRate = localStorage.getItem('auralis_playback_rate');
     if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
+    if ((merged.ttsProvider as string) === 'piper') merged.ttsProvider = 'gemini';
     return merged;
   } catch {
     return DEFAULT_SETTINGS;
@@ -174,7 +168,6 @@ function audioSourceLabel(voiceId?: string): string {
   const provider = separator >= 0 ? voiceId.slice(0, separator) : '';
   const name = separator >= 0 ? voiceId.slice(separator + 1) : voiceId;
   if (provider === 'gemini') return `Gemini · voix ${name}`;
-  if (provider === 'piper') return `Piper local · ${name}`;
   if (provider === 'deepinfra') return `DeepInfra · voix ${name}`;
   if (provider === 'aws-polly') return `Amazon Polly · voix ${name}`;
   return `Audio généré · ${voiceId}`;
@@ -229,19 +222,12 @@ export default function AudiobookApp() {
     error?: boolean;
   } | null>(null);
   const [audioMap, setAudioMap] = useState<Record<string, AudioRecord>>({});
-  const [voiceCatalog, setVoiceCatalog] = useState<VoiceCatalogItem[]>([]);
   const [geminiVoices, setGeminiVoices] = useState<GeminiVoiceOption[]>(CLOUD_VOICES);
-  const [storedVoices, setStoredVoices] = useState<string[]>([]);
-  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [speechState, setSpeechState] = useState<'idle' | 'playing' | 'paused'>(
-    'idle'
-  );
-  const [speechProgress, setSpeechProgress] = useState(0);
   const [generation, setGeneration] = useState<{
     active: boolean;
     progress: number;
     label: string;
-    mode: 'voice' | 'chapter' | 'book';
+    mode: 'chapter' | 'book';
   } | null>(null);
   const [renameChapter, setRenameChapter] = useState<Chapter | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -345,15 +331,14 @@ export default function AudiobookApp() {
 
   const activeParagraphIndex = useMemo(() => {
     if (!paragraphs.length) return 0;
-    const progress =
-      playableAudioUrl && audioDuration > 0
-        ? audioCurrentTime / audioDuration
-        : speechProgress / 100;
+    const progress = playableAudioUrl && audioDuration > 0
+      ? audioCurrentTime / audioDuration
+      : 0;
     return Math.min(
       paragraphs.length - 1,
       Math.floor(progress * paragraphs.length)
     );
-  }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime, speechProgress]);
+  }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime]);
 
   useEffect(() => {
     void (async () => {
@@ -395,11 +380,12 @@ export default function AudiobookApp() {
     }
     if (!selectedBook.chapters.some(chapter => chapter.id === chapterId))
       setChapterId(selectedBook.chapters[0]?.id ?? '');
-    void getBookAudio(selectedBook.id).then(records =>
-      setAudioMap(
-        Object.fromEntries(records.map(record => [record.chapterId, record]))
-      )
-    );
+    void getBookAudio(selectedBook.id).then(async records => {
+      const previousLocalAudio = records.filter(record => record.voiceId?.startsWith('piper:'));
+      await Promise.all(previousLocalAudio.map(record => deleteAudio(record.bookId, record.chapterId))).catch(() => undefined);
+      const allowed = records.filter(record => record.voiceId && !record.voiceId.startsWith('piper:'));
+      setAudioMap(Object.fromEntries(allowed.map(record => [record.chapterId, record])));
+    });
   }, [selectedBook?.id]);
 
   useEffect(() => {
@@ -409,16 +395,6 @@ export default function AudiobookApp() {
   }, [audioUrl]);
 
   useEffect(() => {
-    const refresh = () =>
-      setSystemVoices(window.speechSynthesis?.getVoices?.() ?? []);
-    refresh();
-    window.speechSynthesis?.addEventListener?.('voiceschanged', refresh);
-    return () =>
-      window.speechSynthesis?.removeEventListener?.('voiceschanged', refresh);
-  }, []);
-
-  useEffect(() => {
-    void refreshVoiceData();
     void refreshGeminiVoiceData();
     void getCloudCapabilities().catch(() => undefined);
   }, []);
@@ -505,8 +481,6 @@ export default function AudiobookApp() {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
           if (audioRef.current) audioRef.current.pause();
-          window.speechSynthesis?.cancel();
-          setSpeechState('idle');
           setAudioPlaying(false);
           setSleepTimerMinutes(null);
           showToast('Minuterie de veille : lecture mise en pause.');
@@ -525,7 +499,7 @@ export default function AudiobookApp() {
       message.includes('RESOURCE_EXHAUSTED') ||
       message.includes('exceeded your current quota')
     ) {
-      cleanMessage = 'Limite de génération IA atteinte (429). Gemini n’a pas terminé le chapitre. Réessaie plus tard ; « Voix directe » utilise uniquement la voix de ton ordinateur.';
+      cleanMessage = 'Limite de génération IA atteinte (429). Gemini n’a pas terminé le chapitre. Réessaie plus tard.';
     }
     setToast({ message: cleanMessage, error });
     window.setTimeout(() => setToast(null), 5500);
@@ -553,33 +527,6 @@ export default function AudiobookApp() {
     passwordResolver.current = null;
     setPasswordPrompt(null);
     setPasswordValue('');
-  }
-
-  async function refreshVoiceData(): Promise<void> {
-    try {
-      const [catalog, stored] = await Promise.all([
-        getVoiceCatalog(),
-        getStoredVoices(),
-      ]);
-      setVoiceCatalog(catalog);
-      setStoredVoices(stored);
-      const selectedExists = catalog.some(
-        voice => voice.id === settings.voiceId
-      );
-      if (!selectedExists) {
-        const french = catalog.find(voice => voice.id.startsWith('fr_'));
-        if (french)
-          setSettings(current => ({ ...current, voiceId: french.id }));
-      }
-    } catch {
-      setVoiceCatalog([
-        {
-          id: settings.voiceId,
-          label: settings.voiceId.replace(/_/g, ' '),
-          language: 'Français',
-        },
-      ]);
-    }
   }
 
   async function refreshGeminiVoiceData(): Promise<void> {
@@ -657,7 +604,7 @@ export default function AudiobookApp() {
     setImportProgress(null);
     if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
     else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
-    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte cloud prêt. La voix cloud s’activera dès qu’une clé TTS sera configurée ; Piper reste disponible en secours.');
+    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte prêt. Le service IA doit être configuré sur Netlify pour générer l’audio.');
   }
 
   async function importLocalFile(file: File): Promise<void> {
@@ -756,12 +703,6 @@ export default function AudiobookApp() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   }
 
-  function stopSpeech(): void {
-    window.speechSynthesis?.cancel();
-    setSpeechState('idle');
-    setSpeechProgress(0);
-  }
-
   function stopAllPlayback(): void {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -769,7 +710,6 @@ export default function AudiobookApp() {
     }
     setAudioPlaying(false);
     setAudioCurrentTime(0);
-    stopSpeech();
   }
 
   function updateRate(newRate: number): void {
@@ -910,7 +850,6 @@ export default function AudiobookApp() {
       // Génération par petits segments : fiable avec les limites d'exécution Netlify.
       const result = await synthesizeChapter(
         clean,
-        settings.voiceId,
         (progress, label) => setGeneration({ active: true, progress, label, mode: 'chapter' }),
         () => false,
         settings.apiKey,
@@ -1009,8 +948,6 @@ export default function AudiobookApp() {
       const target = Math.max(0, Math.min(audioDuration, (audioRef.current.currentTime || 0) + seconds));
       audioRef.current.currentTime = target;
       setAudioCurrentTime(target);
-    } else if (speechState === 'playing') {
-      showToast(seconds > 0 ? '+15s (disponible sur l’audio généré)' : '-15s (disponible sur l’audio généré)');
     }
   }
 
@@ -1053,99 +990,10 @@ export default function AudiobookApp() {
     }
   }
 
-  function toggleInstantSpeech(): void {
-    if (!selectedChapter) return;
-    if (!('speechSynthesis' in window)) {
-      showToast(
-        'La lecture vocale système n’est pas disponible dans ce navigateur.',
-        true
-      );
-      return;
-    }
-    if (speechState === 'playing') {
-      window.speechSynthesis.pause();
-      setSpeechState('paused');
-      return;
-    }
-    if (speechState === 'paused') {
-      window.speechSynthesis.resume();
-      setSpeechState('playing');
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(selectedChapter.text);
-    utterance.rate = settings.rate;
-    const voice =
-      systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ??
-      systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
-    if (voice) utterance.voice = voice;
-    utterance.onboundary = (event: SpeechSynthesisEvent) => {
-      setSpeechProgress(
-        Math.min(
-          100,
-          Math.round(
-            (event.charIndex / Math.max(1, selectedChapter.text.length)) * 100
-          )
-        )
-      );
-    };
-    utterance.onend = () => {
-      setSpeechState('idle');
-      setSpeechProgress(100);
-    };
-    utterance.onerror = () => {
-      setSpeechState('idle');
-      showToast('La voix système a interrompu la lecture.', true);
-    };
-    window.speechSynthesis.speak(utterance);
-    setSpeechState('playing');
-  }
-
   async function ensureVoiceReady(): Promise<boolean> {
-    const activeKey =
-      settings.apiKey?.trim() ||
-      localStorage.getItem('auralis_api_key') ||
-      localStorage.getItem('auralis_gemini_api_key') ||
-      undefined;
-    const provider = settings.ttsProvider || 'gemini';
-    if (provider !== 'piper') {
-      if (await isRemoteTtsAvailable(false, activeKey)) return true;
-      showToast(
-        `Le service ${provider} n’est pas disponible sur Netlify. Aucune voix locale ne sera utilisée à sa place.`,
-        true
-      );
-      return false;
-    }
-    if (storedVoices.includes(settings.voiceId)) return true;
-    setGeneration({
-      active: true,
-      progress: 0,
-      label: 'Téléchargement du modèle vocal local',
-      mode: 'voice',
-    });
-    try {
-      await downloadVoice(settings.voiceId, progress =>
-        setGeneration({
-          active: true,
-          progress,
-          label: `Téléchargement de la voix · ${progress} %`,
-          mode: 'voice',
-        })
-      );
-      const stored = await getStoredVoices();
-      setStoredVoices(stored);
-      return true;
-    } catch (error) {
-      showToast(
-        error instanceof Error
-          ? error.message
-          : 'Impossible de télécharger la voix locale.',
-        true
-      );
-      return false;
-    } finally {
-      setGeneration(null);
-    }
+    if (await isRemoteTtsAvailable(false, settings.apiKey)) return true;
+    showToast('Le fournisseur IA est indisponible sur Netlify. Vérifie sa configuration.', true);
+    return false;
   }
 
   async function generateOne(
@@ -1165,7 +1013,6 @@ export default function AudiobookApp() {
     try {
       const result = await synthesizeChapter(
         chapter.text,
-        settings.voiceId,
         (progress, label) =>
           setGeneration({ active: true, progress, label, mode }),
         () => cancelGeneration.current,
@@ -1207,12 +1054,10 @@ export default function AudiobookApp() {
     const ready = await ensureVoiceReady();
     if (!ready) return;
     const provider = settings.ttsProvider || 'gemini';
-    const remoteReady = provider !== 'piper' && await isRemoteTtsAvailable(false, settings.apiKey);
+    const remoteReady = await isRemoteTtsAvailable(false, settings.apiKey);
     const defaultCloudVoice =
       provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
-    const expectedVoiceId = remoteReady
-      ? `${provider}:${settings.cloudVoice || defaultCloudVoice}`
-      : `piper:${settings.voiceId}`;
+    const expectedVoiceId = `${provider}:${settings.cloudVoice || defaultCloudVoice}`;
     let completed = 0;
     for (let index = 0; index < selectedBook.chapters.length; index += 1) {
       if (cancelGeneration.current) break;
@@ -1316,21 +1161,6 @@ export default function AudiobookApp() {
     setDeleteTarget(null);
     showToast(deleteTarget.cloudJobId ? 'Livre supprimé de cet appareil et du cloud.' : 'Livre supprimé de cet appareil.');
   }
-
-  async function forgetVoice(): Promise<void> {
-    if (!storedVoices.includes(settings.voiceId)) return;
-    try {
-      await removeVoice(settings.voiceId);
-      await refreshVoiceData();
-      showToast('Modèle vocal supprimé du stockage local.');
-    } catch {
-      showToast('Impossible de supprimer ce modèle vocal.', true);
-    }
-  }
-
-  const frenchSystemVoices = systemVoices.filter(voice =>
-    voice.lang.toLowerCase().startsWith('fr')
-  );
 
   return (
     <div className="lv-app">
