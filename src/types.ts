@@ -42,7 +42,7 @@ export type AudioRecord = {
   createdAt: number;
 };
 
-export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly';
+export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly' | 'piper';
 
 export type AppSettings = {
   rate: number;
