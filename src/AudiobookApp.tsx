@@ -774,7 +774,6 @@ export default function AudiobookApp() {
       if (audioPlaying) {
         audioRef.current.pause();
       } else {
-        stopSpeech();
         void audioRef.current.play().catch(e => {
           console.error('Audio playback error:', e);
         });
@@ -801,7 +800,7 @@ export default function AudiobookApp() {
           'Content-Type': 'application/json',
           ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
           ...(settings.apiSecret ? { 'x-api-secret': settings.apiSecret } : {}),
-          'x-tts-provider': settings.ttsProvider === 'piper' ? 'gemini' : (settings.ttsProvider || 'gemini'),
+          'x-tts-provider': settings.ttsProvider || 'gemini',
           ...(settings.awsRegion ? { 'x-aws-region': settings.awsRegion } : {}),
         },
         body: JSON.stringify({
@@ -810,7 +809,7 @@ export default function AudiobookApp() {
           bookTitle: selectedBook.title,
           previousChaptersContext: prevContext,
           customApiKey: settings.apiKey,
-          provider: settings.ttsProvider === 'piper' ? 'gemini' : (settings.ttsProvider || 'gemini'),
+          provider: settings.ttsProvider || 'gemini',
           apiSecret: settings.apiSecret,
           region: settings.awsRegion,
         }),
@@ -1367,7 +1366,7 @@ export default function AudiobookApp() {
                     <strong>
                       <FileAudio size={14} /> Vrais fichiers WAV
                     </strong>
-                    Génère chaque chapitre avec Piper, puis exporte le livre
+                    Génère les chapitres avec Gemini, puis exporte le livre
                     complet dans une archive ZIP.
                   </div>
                 </div>
@@ -1481,7 +1480,6 @@ export default function AudiobookApp() {
                         key={chapter.id}
                         className={`lv-chapter-row ${selectedChapter.id === chapter.id ? 'active' : ''}`}
                         onClick={() => {
-                          stopSpeech();
                           setChapterId(chapter.id);
                         }}
                       >
@@ -1509,8 +1507,7 @@ export default function AudiobookApp() {
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                           <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
                             <Volume2 size={12} />
-                            {speechState === 'playing' ? 'Voix système du PC · sans Gemini' :
-                              currentAudio ? audioSourceLabel(currentAudio.voiceId) :
+                            {currentAudio ? audioSourceLabel(currentAudio.voiceId) :
                               selectedChapter.audioUrl ? 'Audio distant (fournisseur non identifié)' :
                               'Audio non généré'}
                           </span>
@@ -1527,7 +1524,7 @@ export default function AudiobookApp() {
                         {paragraphs.map((para, idx) => (
                           <p
                             key={idx}
-                            className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                            className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying) ? 'active' : ''}`}
                             onClick={() => {
                               if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                                 const targetSec = (idx / paragraphs.length) * audioDuration;
@@ -1547,7 +1544,7 @@ export default function AudiobookApp() {
                       <div className="lv-player-header">
                         <div className="lv-player-track-info">
                           <div className="lv-player-cover">
-                            {audioPlaying || speechState === 'playing' ? (
+                            {audioPlaying ? (
                               <div className="lv-eq-bars">
                                 <span className="lv-eq-bar" />
                                 <span className="lv-eq-bar" />
@@ -1578,18 +1575,14 @@ export default function AudiobookApp() {
                       {/* Scrubber Timeline */}
                       <div className="lv-scrubber-container">
                         <span className="lv-time-display">
-                          {playableAudioUrl
-                            ? formatTime(audioCurrentTime)
-                            : speechProgress > 0
-                              ? `${speechProgress}%`
-                              : '0:00'}
+                          {playableAudioUrl ? formatTime(audioCurrentTime) : '0:00'}
                         </span>
                         <input
                           type="range"
                           min={0}
                           max={playableAudioUrl ? (audioDuration || 1) : 100}
                           step={playableAudioUrl ? 0.5 : 1}
-                          value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                          value={playableAudioUrl ? audioCurrentTime : 0}
                           onChange={e => {
                             if (playableAudioUrl) {
                               seekTo(Number(e.target.value));
@@ -1630,11 +1623,11 @@ export default function AudiobookApp() {
 
                         <button
                           className="lv-ctrl-btn-play"
-                          title={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire l’audio'}
+                          title={audioPlaying ? 'Mettre en pause' : 'Lire l’audio'}
                           onClick={togglePlayPause}
-                          aria-label={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire'}
+                          aria-label={audioPlaying ? 'Mettre en pause' : 'Lire'}
                         >
-                          {audioPlaying || speechState === 'playing' ? (
+                          {audioPlaying ? (
                             <Pause size={24} fill="currentColor" />
                           ) : (
                             <Play size={24} fill="currentColor" style={{ marginLeft: '2px' }} />
@@ -1692,16 +1685,7 @@ export default function AudiobookApp() {
                             <span>Résumé IA</span>
                           </button>
 
-                          <button
-                            type="button"
-                            className="lv-icon-button"
-                            style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
-                            onClick={toggleInstantSpeech}
-                            title="Synthèse vocale système instantanée (sans génération)"
-                          >
-                            <Volume2 size={13} />
-                            <span>{speechState === 'playing' ? 'Pause voix PC' : 'Voix du PC (sans Gemini)'}</span>
-                          </button>
+
 
                           <select
                             aria-label="Minuterie de veille"
@@ -1760,8 +1744,6 @@ export default function AudiobookApp() {
                       }}
                       onPlay={() => {
                         setAudioPlaying(true);
-                        window.speechSynthesis?.cancel();
-                        setSpeechState('idle');
                       }}
                       onPause={() => {
                         setAudioPlaying(false);
@@ -1929,7 +1911,7 @@ export default function AudiobookApp() {
                 <section className="lv-export-stack">
                   <div className="lv-card lv-export-hero">
                     <div className="lv-badge">
-                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : settings.ttsProvider === 'piper' ? 'Piper local sélectionné' : `Moteur IA sélectionné · ${settings.ttsProvider || 'gemini'}`}
+                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : `Moteur IA sélectionné · ${settings.ttsProvider || 'gemini'}`}
                     </div>
                     <h2>{isCloudBook ? 'Livre audio progressif dans le cloud' : 'Génère le vrai livre audio'}</h2>
                     <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis ta voix Gemini dans les réglages, puis génère ce chapitre ou tout le livre. La génération est toujours volontaire ; les fichiers audio restent enregistrés sur cet appareil.'}</p>
@@ -1942,9 +1924,9 @@ export default function AudiobookApp() {
                       </div>
                       <div className="lv-stat">
                         <strong>
-                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'Secours') : settings.ttsProvider === 'piper' ? (storedVoices.includes(settings.voiceId) ? 'Piper prêt' : 'À télécharger') : (settings.ttsProvider || 'Gemini')}
+                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'En attente') : (settings.ttsProvider || 'Gemini')}
                         </strong>
-                        <span>{isCloudBook ? 'moteur cloud' : 'voix en cache'}</span>
+                        <span>{isCloudBook ? 'moteur IA distant' : 'fournisseur IA'}</span>
                       </div>
                       <div className="lv-stat">
                         <strong>{isCloudBook ? `${selectedBook.cloudAudioReady ?? 0}` : 'WAV'}</strong>
@@ -1962,7 +1944,7 @@ export default function AudiobookApp() {
                           <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
                             <RotateCcw size={15} /> Reprendre le traitement cloud
                           </button>
-                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre en local</button>}
+                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre via IA</button>}
                         </>
                       ) : (
                         <>
@@ -2219,84 +2201,6 @@ export default function AudiobookApp() {
             </div>
 
             <div className="lv-field">
-              <label htmlFor="neural-voice">Voix locale Piper (Secours & Hors-ligne)</label>
-              <select
-                id="neural-voice"
-                className="lv-select"
-                value={settings.voiceId}
-                onChange={event =>
-                  setSettings(current => ({
-                    ...current,
-                    voiceId: event.target.value,
-                  }))
-                }
-              >
-                {(voiceCatalog.length
-                  ? voiceCatalog
-                  : [
-                      {
-                        id: settings.voiceId,
-                        label: settings.voiceId,
-                        language: 'Français',
-                      },
-                    ]
-                ).map(voice => (
-                  <option key={voice.id} value={voice.id}>
-                    {voice.language} · {voice.label}
-                  </option>
-                ))}
-              </select>
-              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                {storedVoices.includes(settings.voiceId)
-                  ? '✓ Cette voix locale est enregistrée dans votre navigateur.'
-                  : 'Téléchargée automatiquement lors de la première génération locale.'}
-              </p>
-            </div>
-
-            <div className="lv-field">
-              <label htmlFor="system-voice">
-                Voix système (Pour le bouton « Écouter » instantané)
-              </label>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <select
-                  id="system-voice"
-                  className="lv-select"
-                  style={{ flex: 1 }}
-                  value={settings.systemVoiceUri}
-                  onChange={event =>
-                    setSettings(current => ({
-                      ...current,
-                      systemVoiceUri: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Automatique (meilleure voix française)</option>
-                  {frenchSystemVoices.map(voice => (
-                    <option key={voice.voiceURI} value={voice.voiceURI}>
-                      {voice.name} ({voice.lang})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="lv-secondary"
-                  style={{ width: 'auto', whiteSpace: 'nowrap' }}
-                  onClick={() => {
-                    if (!('speechSynthesis' in window)) return;
-                    window.speechSynthesis.cancel();
-                    const utt = new SpeechSynthesisUtterance('Bonjour ! Ceci est un aperçu de la voix pour votre livre audio.');
-                    utt.rate = settings.rate;
-                    const v = systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ||
-                              systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
-                    if (v) utt.voice = v;
-                    window.speechSynthesis.speak(utt);
-                  }}
-                >
-                  Tester
-                </button>
-              </div>
-            </div>
-            <div className="lv-field">
               <label htmlFor="ocr-lang">Langue OCR</label>
               <select
                 id="ocr-lang"
@@ -2347,7 +2251,6 @@ export default function AudiobookApp() {
               >
                 <option value="deepinfra">DeepInfra · Kokoro (économique)</option>
                 <option value="gemini">Google IA · Gemini (serveur)</option>
-                <option value="piper">Piper · voix locale (sans Gemini)</option>
                 <option value="aws-polly">Amazon Polly</option>
               </select>
             </div>
@@ -2419,14 +2322,6 @@ export default function AudiobookApp() {
               </p>
             </div>
             <div className="lv-modal-actions">
-              {storedVoices.includes(settings.voiceId) && (
-                <button
-                  className="lv-ghost lv-danger"
-                  onClick={() => void forgetVoice()}
-                >
-                  <Trash2 size={13} /> Oublier cette voix
-                </button>
-              )}
               <button
                 className="lv-primary"
                 style={{ width: 'auto' }}
@@ -2695,11 +2590,11 @@ export default function AudiobookApp() {
       )}
 
       {/* Barre de lecture fixe en bas d'écran (Sticky Docked Player) uniquement hors onglet lecteur */}
-      {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying || speechState === 'playing') && !dockedDismissed && (
+      {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying) && !dockedDismissed && (
         <div className="lv-docked-player">
           <div className="lv-docked-left">
             <div className="lv-player-cover" style={{ width: '38px', height: '38px', borderRadius: '10px' }}>
-              {audioPlaying || speechState === 'playing' ? (
+              {audioPlaying ? (
                 <div className="lv-eq-bars" style={{ height: '12px' }}>
                   <span className="lv-eq-bar" />
                   <span className="lv-eq-bar" />
@@ -2723,8 +2618,8 @@ export default function AudiobookApp() {
               <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(-15)} title="-15s">
                 <RotateCcw size={13} />
               </button>
-              <button className="lv-ctrl-btn-play" style={{ width: '40px', height: '40px' }} onClick={togglePlayPause} title={audioPlaying || speechState === 'playing' ? 'Pause' : 'Lecture'}>
-                {audioPlaying || speechState === 'playing' ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
+              <button className="lv-ctrl-btn-play" style={{ width: '40px', height: '40px' }} onClick={togglePlayPause} title={audioPlaying ? 'Pause' : 'Lecture'}>
+                {audioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
               </button>
               <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(15)} title="+15s">
                 <RotateCw size={13} />
@@ -2737,7 +2632,7 @@ export default function AudiobookApp() {
 
           <div className="lv-docked-right">
             <span className="lv-time-display" style={{ fontSize: '11px' }}>
-              {playableAudioUrl ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)}` : `${speechProgress}%`}
+              {playableAudioUrl ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)}` : '0:00'}
             </span>
             <button className="lv-icon-button" title="Ouvrir le lecteur complet" onClick={() => setTab('listen')}>
               <Headphones size={15} />
@@ -2761,8 +2656,7 @@ export default function AudiobookApp() {
             </button>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
-                <Volume2 size={13} /> {speechState === 'playing' ? 'Voix du PC · sans Gemini' :
-                  currentAudio ? audioSourceLabel(currentAudio.voiceId) :
+                <Volume2 size={13} /> {currentAudio ? audioSourceLabel(currentAudio.voiceId) :
                   playableAudioUrl ? 'Audio distant' : 'Audio non généré'}
               </span>
               {sleepRemainingSeconds !== null && (
@@ -2776,7 +2670,7 @@ export default function AudiobookApp() {
           <div className="lv-immersive-body">
             <div className="lv-immersive-artwork">
               <div className="lv-immersive-artwork-glow" />
-              {audioPlaying || speechState === 'playing' ? (
+              {audioPlaying ? (
                 <div className="lv-eq-bars" style={{ height: '40px', gap: '8px' }}>
                   <span className="lv-eq-bar" style={{ width: '6px' }} />
                   <span className="lv-eq-bar" style={{ width: '6px' }} />
@@ -2796,13 +2690,13 @@ export default function AudiobookApp() {
 
             <div className="lv-immersive-controls">
               <div className="lv-scrubber-container">
-                <span className="lv-time-display">{playableAudioUrl ? formatTime(audioCurrentTime) : `${speechProgress}%`}</span>
+                <span className="lv-time-display">{playableAudioUrl ? formatTime(audioCurrentTime) : '0:00'}</span>
                 <input
                   type="range"
                   min={0}
                   max={playableAudioUrl ? (audioDuration || 1) : 100}
                   step={playableAudioUrl ? 0.5 : 1}
-                  value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                  value={playableAudioUrl ? audioCurrentTime : 0}
                   onChange={e => {
                     if (playableAudioUrl) seekTo(Number(e.target.value));
                   }}
@@ -2823,7 +2717,7 @@ export default function AudiobookApp() {
                   <span className="lv-skip-label">15</span>
                 </button>
                 <button className="lv-ctrl-btn-play" style={{ width: '68px', height: '68px' }} onClick={togglePlayPause}>
-                  {audioPlaying || speechState === 'playing' ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: '3px' }} />}
+                  {audioPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: '3px' }} />}
                 </button>
                 <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={() => handleSkip(15)} title="+15s">
                   <RotateCw size={18} />
@@ -2839,7 +2733,7 @@ export default function AudiobookApp() {
               {paragraphs.map((para, idx) => (
                 <p
                   key={idx}
-                  className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                  className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying) ? 'active' : ''}`}
                   onClick={() => {
                     if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                       const targetSec = (idx / paragraphs.length) * audioDuration;
