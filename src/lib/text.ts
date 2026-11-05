@@ -27,69 +27,98 @@ function makeChapter(title: string, text: string, index: number): Chapter {
   };
 }
 
-function isHeading(line: string): boolean {
-  const value = line.trim();
-  if (!value || value.length > 110) return false;
-  return (
-    /^(chapitre|chapter|partie|part|prologue|épilogue|epilogue|introduction|conclusion|préface|preface|avant-propos|interlude)\b[\s\d:—–.-]*/i.test(
-      value
-    ) ||
-    /^\d{1,3}[.)-]\s+[A-ZÀ-ÖØ-Ý]/.test(value) ||
-    (/^[A-ZÀ-ÖØ-Ý0-9][A-ZÀ-ÖØ-Ý0-9 '\-–—,:]{3,70}$/.test(value) &&
-      value.split(/\s+/).length <= 10)
-  );
+type HeadingKind = 'structural' | 'numbered';
+
+function headingKind(raw: string): HeadingKind | null {
+  const value = raw.trim();
+  if (value.length < 3 || value.length > 100) return null;
+
+  // Only genuine chapter/part labels count as structural headings.
+  // In particular, ALL-CAPS paragraphs and numbered list items are not chapters.
+  if (
+    /^(?:chapitre|chapter)\s+(?:\d{1,3}|[IVXLCDM]+)(?:\b|\s|[:.\-–—])/i.test(value) ||
+    /^(?:partie|part|livre)\s+(?:\d{1,3}|[IVXLCDM]+)(?:\b|\s|[:.\-–—])/i.test(value) ||
+    /^(?:prologue|épilogue|epilogue|introduction|conclusion|préface|preface|avant-propos)(?:\s*[:.\-–—].{1,60})?$/i.test(value)
+  ) return 'structural';
+
+  // Number-only chapter titles are ambiguous in nonfiction books: accept
+  // them only if the overall document has a plausible number and spacing.
+  if (/^\d{1,2}[.)-]\s+[A-ZÀ-ÖØ-Ý][^.!?]{5,75}$/.test(value)) return 'numbered';
+  return null;
 }
 
-function smartBlocks(text: string, targetChars = 11500): string[] {
-  const paragraphs = text
-    .split(/\n{2,}/)
-    .map(p => p.trim())
-    .filter(Boolean);
-  const result: string[] = [];
-  let current = '';
-  for (const paragraph of paragraphs) {
-    if (current && current.length + paragraph.length > targetChars) {
-      result.push(current.trim());
-      current = paragraph;
-    } else {
-      current += `${current ? '\n\n' : ''}${paragraph}`;
-    }
+export type PdfChapterSection = {
+  title: string;
+  text: string;
+};
+
+/**
+ * Returns *real* chapters only. The 500-character chunks used by Gemini TTS
+ * are a separate implementation detail; never expose them as book chapters.
+ */
+export function splitIntoChapters(text: string, outlined?: PdfChapterSection[]): Chapter[] {
+  const source = text.trim();
+  if (!source) return [];
+
+  // Prefer the document's own PDF bookmarks when they identify chapter pages.
+  // Don't split genuine chapters just because the audio generator has a smaller
+  // technical limit.
+  const trusted = (outlined || []).filter(section => section.text.trim().length >= 200);
+  if (trusted.length >= 2 && trusted.length <= 60) {
+    return trusted.map((section, index) => makeChapter(section.title, section.text, index));
   }
-  if (current.trim()) result.push(current.trim());
-  return result.length ? result : [text.trim()];
-}
 
-export function splitIntoChapters(text: string): Chapter[] {
-  const lines = text.split('\n');
-  const headings = lines
-    .map((line, index) => ({ line: line.trim(), index }))
-    .filter(({ line }) => isHeading(line));
+  const lines = source.split('\n');
+  const candidates: Array<{ index: number; title: string; kind: HeadingKind; offset: number }> = [];
+  let offset = 0;
+  lines.forEach((line, index) => {
+    const title = line.trim();
+    const kind = headingKind(title);
+    if (kind) candidates.push({ index, title, kind, offset });
+    offset += line.length + 1;
+  });
 
-  if (headings.length >= 2) {
+  const maxDetected = Math.min(45, Math.max(6, Math.floor(source.length / 9000)));
+  function isPlausible(headings: typeof candidates): boolean {
+    if (headings.length < 2 || headings.length > maxDetected) return false;
+    const gaps = headings.slice(1).map((h, i) => h.offset - headings[i].offset);
+    const crowded = gaps.filter(gap => gap < 1600).length;
+    if (source.length >= 40000 && crowded > Math.max(1, Math.floor(gaps.length * 0.15))) return false;
+    return source.length / headings.length >= (source.length < 40000 ? 250 : 6500);
+  }
+
+  // Ignore the table of contents, which often repeats every chapter title in
+  // quick succession near the start of the book.
+  const afterContents = source.length < 40000
+    ? candidates
+    : candidates.filter(h => h.offset >= Math.min(65000, source.length * 0.045));
+  const structural = afterContents.filter(h => h.kind === 'structural');
+  const numbered = afterContents.filter(h => h.kind === 'numbered');
+  const headings = isPlausible(structural)
+    ? structural
+    : isPlausible(numbered)
+      ? numbered
+      : [];
+
+  if (headings.length) {
     const chapters: Chapter[] = [];
-    if (headings[0].index > 2) {
-      const intro = lines.slice(0, headings[0].index).join('\n').trim();
-      if (intro.length > 160)
-        chapters.push(makeChapter('Ouverture', intro, chapters.length));
-    }
+    const intro = lines.slice(0, headings[0].index).join('\n').trim();
+    if (intro.length >= 500) chapters.push(makeChapter('Pages préliminaires', intro, chapters.length));
+
     headings.forEach((heading, headingIndex) => {
-      const end =
-        headingIndex + 1 < headings.length
-          ? headings[headingIndex + 1].index
-          : lines.length;
-      const body = lines
-        .slice(heading.index + 1, end)
-        .join('\n')
-        .trim();
-      if (body.length > 60)
-        chapters.push(makeChapter(heading.line, body, chapters.length));
+      const end = headings[headingIndex + 1]?.index ?? lines.length;
+      const body = lines.slice(heading.index + 1, end).join('\n').trim();
+      if (body.length >= 250) {
+        chapters.push(makeChapter(heading.title, body, chapters.length));
+      }
     });
     if (chapters.length >= 2) return chapters;
   }
 
-  return smartBlocks(text).map((block, index) =>
-    makeChapter(`Chapitre ${index + 1}`, block, index)
-  );
+  // Do not fabricate "85 chapters" from 14k-character audio chunks.
+  // Preserve the full text and be transparent when original chapter boundaries
+  // cannot be established confidently.
+  return [makeChapter('Texte intégral — chapitres non détectés', source, 0)];
 }
 
 export function chunkForSpeech(text: string, maxChars = 650): string[] {

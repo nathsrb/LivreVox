@@ -21,9 +21,10 @@ type ProviderCredentials = {
   region?: string;
 };
 
-function normalizeProvider(value?: string): ProviderName {
-  if (value === 'deepinfra' || value === 'aws-polly') return value;
-  return 'gemini';
+function normalizeProvider(_value?: string): ProviderName {
+  // Preview-only build: Kokoro via DeepInfra is the sole permitted generation provider.
+  // This also rejects stale Gemini preferences and any client-supplied override.
+  return 'deepinfra';
 }
 
 function sha256Hex(value: string): string {
@@ -58,8 +59,12 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
   });
   if (!response.ok) throw new Error('Gemini TTS (' + response.status + '): ' + (await response.text()).slice(0,700));
   const data = await response.json() as any;
+  // Interactions API returns the audio directly as output_audio.data.
+  // Older shapes may still expose it through a step.
   const block = modern
-    ? (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : []).filter((c: any) => c?.type === 'audio' && c?.data).at(-1)
+    ? (data?.output_audio || data?.outputAudio ||
+        (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : [])
+          .filter((c: any) => c?.type === 'audio' && c?.data).at(-1))
     : data?.candidates?.[0]?.content?.parts?.find((p: any) => p?.inlineData?.data)?.inlineData;
   if (!block?.data) throw new Error('Le fournisseur Gemini n’a renvoyé aucun audio.');
   let buffer = Buffer.from(block.data, 'base64');
@@ -83,7 +88,7 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       text,
-      tts_response_format: 'mp3',
+      tts_response_format: 'wav',
       preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
       speed: 1,
       stream: false,
@@ -95,10 +100,10 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
   if (/^https?:\/\//.test(payload.audio)) {
     const audio = await fetch(payload.audio);
     if (!audio.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
-    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
+    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/wav', extension: 'wav' };
   }
   const clean = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
-  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/mpeg', extension: 'mp3' };
+  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/wav', extension: 'wav' };
 }
 
 async function synthesizePolly(text: string, voice: string, accessKeyId: string, secretAccessKey: string, region: string) {
@@ -158,7 +163,7 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
       method: 'POST',
       headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: env('DEEPINFRA_TEXT_MODEL') || 'meta-llama/Llama-3.3-70B-Instruct',
+        model: env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
       }),
@@ -326,7 +331,12 @@ function classifyError(error: unknown) {
 }
 
 export default async function handler(request: Request): Promise<Response> {
-  const route = new URL(request.url).searchParams.get('route') || '';
+  const url = new URL(request.url);
+  // Netlify uses a custom path, so read /api/* from the original URL.
+  // Retain query-based routing for compatibility.
+  const route = url.pathname.startsWith('/api/')
+    ? url.pathname.slice('/api/'.length)
+    : (url.searchParams.get('route') || '');
   const path = '/api/' + route.replace(/^\/+/, '');
   const method = request.method.toUpperCase();
   if (method === 'OPTIONS') return new Response(null, {status: 204});
@@ -503,5 +513,7 @@ ${chapterText.slice(0, 48000)}`;
   return respond({error:'Route API non migrée.'},404);
 }
 export const config = {
+  // Serve the original /api/* URL directly instead of a rewrite that lost its route.
+  path: '/api/*',
   rateLimit: { action:'rate_limit', aggregateBy:['ip'],windowSize:60,windowLimit:90 }
 };

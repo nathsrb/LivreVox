@@ -59,6 +59,7 @@ import {
   type CloudJobStatus,
 } from './lib/cloud';
 import {
+  clearSpeechSegments,
   deleteAudio,
   deleteBook,
   getBookAudio,
@@ -68,27 +69,24 @@ import {
 } from './lib/storage';
 import {
   CLOUD_VOICES,
-  downloadVoice,
   getGeminiVoices,
-  getStoredVoices,
-  getVoiceCatalog,
   isRemoteTtsAvailable,
   makeBookZip,
-  removeVoice,
   synthesizeChapter,
   type GeminiVoiceOption,
-  type VoiceCatalogItem,
 } from './lib/tts';
+
+const KOKORO_VOICES: GeminiVoiceOption[] = [
+  { id: 'ff_siwis', label: 'Siwis · Français (Kokoro)', displayName: 'Siwis' },
+];
 
 const DEFAULT_SETTINGS: AppSettings = {
   rate: 1,
-  voiceId: 'fr_FR-siwis-medium',
-  cloudVoice: 'Kore',
-  ttsProvider: 'gemini',
+  cloudVoice: 'ff_siwis',
+  ttsProvider: 'deepinfra',
   apiKey: '',
   apiSecret: '',
   awsRegion: 'eu-west-3',
-  systemVoiceUri: '',
   ocrLang: 'fra+eng',
   autoOcr: true,
 };
@@ -127,18 +125,22 @@ function loadSettings(): AppSettings {
   try {
     const rawA = localStorage.getItem('auralis-settings');
     const rawL = localStorage.getItem('livrevox-settings');
-    const directKey =
-      localStorage.getItem('auralis_gemini_api_key') ||
-      localStorage.getItem('gemini_api_key');
     const parsedA = rawA ? (JSON.parse(rawA) as Partial<AppSettings>) : {};
     const parsedL = rawL ? (JSON.parse(rawL) as Partial<AppSettings>) : {};
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsedL, ...parsedA };
-    if (directKey && directKey.trim() && !merged.apiKey) {
-      merged.apiKey = directKey.trim();
-      merged.geminiApiKey = directKey.trim();
-    }
     const savedRate = localStorage.getItem('auralis_playback_rate');
     if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
+    // Kokoro/DeepInfra is the only speech-generation provider in this preview.
+    // Retain an existing DeepInfra key, but do not reuse a legacy Google key.
+    if (merged.ttsProvider !== 'deepinfra') {
+      merged.ttsProvider = 'deepinfra';
+      merged.cloudVoice = 'ff_siwis';
+      merged.apiKey = '';
+    }
+    if (merged.cloudVoice !== 'ff_siwis') merged.cloudVoice = 'ff_siwis';
+    // Don't persist obsolete local voice identifiers from older app versions.
+    delete (merged as unknown as Record<string, unknown>).voiceId;
+    delete (merged as unknown as Record<string, unknown>).systemVoiceUri;
     return merged;
   } catch {
     return DEFAULT_SETTINGS;
@@ -168,6 +170,21 @@ function renderFormattedSummary(text: string) {
   );
 }
 
+function isCloudGeneratedAudio(record: AudioRecord): boolean {
+  return /^(gemini|deepinfra|aws-polly):/.test(record.voiceId || '');
+}
+
+function audioSourceLabel(voiceId?: string): string {
+  if (!voiceId) return 'Audio non généré';
+  const separator = voiceId.indexOf(':');
+  const provider = separator >= 0 ? voiceId.slice(0, separator) : '';
+  const name = separator >= 0 ? voiceId.slice(separator + 1) : voiceId;
+  if (provider === 'gemini') return `Gemini · voix ${name}`;
+  if (provider === 'deepinfra') return `DeepInfra · voix ${name}`;
+  if (provider === 'aws-polly') return `Amazon Polly · voix ${name}`;
+  return `Audio généré · ${voiceId}`;
+}
+
 function saveAs(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -183,7 +200,8 @@ function buildBook(
   sourceSize: number,
   pages: number,
   text: string,
-  ocrUsed: boolean
+  ocrUsed: boolean,
+  outlineChapters?: Array<{ title: string; text: string }>
 ): Book {
   const now = Date.now();
   return {
@@ -195,7 +213,7 @@ function buildBook(
     createdAt: now,
     updatedAt: now,
     ocrUsed,
-    chapters: splitIntoChapters(cleanExtractedText(text)),
+    chapters: splitIntoChapters(cleanExtractedText(text), outlineChapters),
     progress: {},
   };
 }
@@ -216,19 +234,12 @@ export default function AudiobookApp() {
     error?: boolean;
   } | null>(null);
   const [audioMap, setAudioMap] = useState<Record<string, AudioRecord>>({});
-  const [voiceCatalog, setVoiceCatalog] = useState<VoiceCatalogItem[]>([]);
   const [geminiVoices, setGeminiVoices] = useState<GeminiVoiceOption[]>(CLOUD_VOICES);
-  const [storedVoices, setStoredVoices] = useState<string[]>([]);
-  const [systemVoices, setSystemVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [speechState, setSpeechState] = useState<'idle' | 'playing' | 'paused'>(
-    'idle'
-  );
-  const [speechProgress, setSpeechProgress] = useState(0);
   const [generation, setGeneration] = useState<{
     active: boolean;
     progress: number;
     label: string;
-    mode: 'voice' | 'chapter' | 'book';
+    mode: 'chapter' | 'book';
   } | null>(null);
   const [renameChapter, setRenameChapter] = useState<Chapter | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -312,7 +323,9 @@ export default function AudiobookApp() {
     ? selectedBook.chapters.filter(chapter => audioMap[chapter.id] || chapter.audioUrl).length
     : 0;
   const isCloudBook = Boolean(selectedBook?.cloudJobId);
-  const playableAudioUrl = selectedChapter?.audioUrl || audioUrl;
+  // Only recordings generated by cloud providers, or explicit remote cloud book URLs, may play.
+  // No browser speechSynthesis / local Piper / local Kokoro TTS fallback.
+  const playableAudioUrl = (isCloudBook && selectedChapter?.audioUrl) || audioUrl;
   const totalWords =
     selectedBook?.chapters.reduce((sum, chapter) => sum + chapter.words, 0) ??
     0;
@@ -332,20 +345,26 @@ export default function AudiobookApp() {
 
   const activeParagraphIndex = useMemo(() => {
     if (!paragraphs.length) return 0;
-    const progress =
-      playableAudioUrl && audioDuration > 0
-        ? audioCurrentTime / audioDuration
-        : speechProgress / 100;
+    const progress = playableAudioUrl && audioDuration > 0
+      ? audioCurrentTime / audioDuration
+      : 0;
     return Math.min(
       paragraphs.length - 1,
       Math.floor(progress * paragraphs.length)
     );
-  }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime, speechProgress]);
+  }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime]);
 
   useEffect(() => {
     void (async () => {
       try {
         const list = await getBooks();
+        // One-time cleanup of legacy computer-generated speech across the whole
+        // library. Preserve cloud-generated recordings and PDF text.
+        await Promise.allSettled(list.map(async book => {
+          const oldRecords = await getBookAudio(book.id);
+          const localOnly = oldRecords.filter(record => !isCloudGeneratedAudio(record));
+          await Promise.all(localOnly.map(record => deleteAudio(record.bookId, record.chapterId)));
+        }));
         setBooks(list);
         if (list.length) {
           setSelectedId(list[0].id);
@@ -382,11 +401,12 @@ export default function AudiobookApp() {
     }
     if (!selectedBook.chapters.some(chapter => chapter.id === chapterId))
       setChapterId(selectedBook.chapters[0]?.id ?? '');
-    void getBookAudio(selectedBook.id).then(records =>
-      setAudioMap(
-        Object.fromEntries(records.map(record => [record.chapterId, record]))
-      )
-    );
+    void getBookAudio(selectedBook.id).then(async records => {
+      const previousLocalAudio = records.filter(record => !isCloudGeneratedAudio(record));
+      await Promise.all(previousLocalAudio.map(record => deleteAudio(record.bookId, record.chapterId))).catch(() => undefined);
+      const allowed = records.filter(isCloudGeneratedAudio);
+      setAudioMap(Object.fromEntries(allowed.map(record => [record.chapterId, record])));
+    });
   }, [selectedBook?.id]);
 
   useEffect(() => {
@@ -396,16 +416,6 @@ export default function AudiobookApp() {
   }, [audioUrl]);
 
   useEffect(() => {
-    const refresh = () =>
-      setSystemVoices(window.speechSynthesis?.getVoices?.() ?? []);
-    refresh();
-    window.speechSynthesis?.addEventListener?.('voiceschanged', refresh);
-    return () =>
-      window.speechSynthesis?.removeEventListener?.('voiceschanged', refresh);
-  }, []);
-
-  useEffect(() => {
-    void refreshVoiceData();
     void refreshGeminiVoiceData();
     void getCloudCapabilities().catch(() => undefined);
   }, []);
@@ -492,8 +502,6 @@ export default function AudiobookApp() {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
           if (audioRef.current) audioRef.current.pause();
-          window.speechSynthesis?.cancel();
-          setSpeechState('idle');
           setAudioPlaying(false);
           setSleepTimerMinutes(null);
           showToast('Minuterie de veille : lecture mise en pause.');
@@ -512,7 +520,9 @@ export default function AudiobookApp() {
       message.includes('RESOURCE_EXHAUSTED') ||
       message.includes('exceeded your current quota')
     ) {
-      cleanMessage = 'Débit temporaire IA atteint (429). Conseil : utilisez « Voix directe » pour écouter immédiatement sans attente.';
+      // Preserve actionable details (remaining chunks and how to resume)
+      // instead of replacing every quota error with a generic warning.
+      cleanMessage = message.slice(0, 440);
     }
     setToast({ message: cleanMessage, error });
     window.setTimeout(() => setToast(null), 5500);
@@ -540,33 +550,6 @@ export default function AudiobookApp() {
     passwordResolver.current = null;
     setPasswordPrompt(null);
     setPasswordValue('');
-  }
-
-  async function refreshVoiceData(): Promise<void> {
-    try {
-      const [catalog, stored] = await Promise.all([
-        getVoiceCatalog(),
-        getStoredVoices(),
-      ]);
-      setVoiceCatalog(catalog);
-      setStoredVoices(stored);
-      const selectedExists = catalog.some(
-        voice => voice.id === settings.voiceId
-      );
-      if (!selectedExists) {
-        const french = catalog.find(voice => voice.id.startsWith('fr_'));
-        if (french)
-          setSettings(current => ({ ...current, voiceId: french.id }));
-      }
-    } catch {
-      setVoiceCatalog([
-        {
-          id: settings.voiceId,
-          label: settings.voiceId.replace(/_/g, ' '),
-          language: 'Français',
-        },
-      ]);
-    }
   }
 
   async function refreshGeminiVoiceData(): Promise<void> {
@@ -644,7 +627,7 @@ export default function AudiobookApp() {
     setImportProgress(null);
     if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
     else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
-    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte cloud prêt. La voix cloud s’activera dès qu’une clé TTS sera configurée ; Piper reste disponible en secours.');
+    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte prêt. Le service IA doit être configuré sur Netlify pour générer l’audio.');
   }
 
   async function importLocalFile(file: File): Promise<void> {
@@ -657,42 +640,20 @@ export default function AudiobookApp() {
     const cleaned = cleanExtractedText(result.text);
     if (cleaned.length < 120) throw new Error('Le PDF ne contient pas assez de texte exploitable.');
     const title = file.name.replace(/\.pdf$/i, '').trim() || 'Livre sans titre';
-    const book = buildBook(title, file.name, file.size, result.pages, cleaned, result.ocrUsed);
+    const book = buildBook(title, file.name, file.size, result.pages, cleaned, result.ocrUsed, result.outlineChapters);
     if (!book.chapters.length) throw new Error('Aucun chapitre exploitable n’a été détecté.');
     await putBook(book);
     setBooks(current => [book, ...current]);
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
 
-    const remoteReady = await isRemoteTtsAvailable(true, settings.apiKey);
-    const firstChapter = book.chapters[0];
-    if (remoteReady && firstChapter) {
-      setImportProgress({
-        stage: `Génération audio IA · chapitre 1/${book.chapters.length}`,
-        progress: 92,
-      });
-      const firstAudio = await generateOne(book, firstChapter, 'chapter');
-      if (firstAudio) {
-        setImportProgress({ stage: 'Premier chapitre audio prêt', progress: 100 });
-        setTimeout(() => setImportProgress(null), 450);
-        showToast(
-          book.chapters.length > 1
-            ? '▶ Le premier chapitre est prêt. Les suivants se génèrent automatiquement.'
-            : '▶ Ton livre audio est prêt à être écouté.'
-        );
-        if (book.chapters.length > 1) void generateRemainingImportedBook(book, 1);
-        return;
-      }
-    }
+    // Import and narration must be separate. No paid API call occurs on upload.
+    setTab('chapters');
+    setImportProgress(null);
+    showToast(book.chapters.length === 1 && book.chapters[0].title.includes('chapitres non détectés')
+      ? 'PDF importé, mais son sommaire ne permet pas de repérer les chapitres d’origine. Le texte est conservé, sans créer de faux chapitres.'
+      : `Livre importé : ${book.chapters.length} section${book.chapters.length > 1 ? 's' : ''}. Choisis la voix avant de générer de l’audio.`);
 
-    setImportProgress({ stage: 'Livre prêt', progress: 100 });
-    setTimeout(() => setImportProgress(null), 350);
-    showToast(
-      remoteReady
-        ? `${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''} importé${book.chapters.length > 1 ? 's' : ''}. La génération audio pourra être relancée.`
-        : 'PDF importé. Configure une clé Gemini valide pour générer automatiquement l’audio IA.',
-      !remoteReady
-    );
   }
 
   async function importCloudFile(file: File): Promise<void> {
@@ -765,12 +726,6 @@ export default function AudiobookApp() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   }
 
-  function stopSpeech(): void {
-    window.speechSynthesis?.cancel();
-    setSpeechState('idle');
-    setSpeechProgress(0);
-  }
-
   function stopAllPlayback(): void {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -778,7 +733,6 @@ export default function AudiobookApp() {
     }
     setAudioPlaying(false);
     setAudioCurrentTime(0);
-    stopSpeech();
   }
 
   function updateRate(newRate: number): void {
@@ -838,34 +792,18 @@ export default function AudiobookApp() {
     showToast(`Chapitre « ${target.title} » supprimé.`);
   }
 
-  async function generateCurrentAndPlay(): Promise<void> {
-    if (!selectedBook || !selectedChapter) return;
-    showToast(`Génération de la voix IA pour « ${selectedChapter.title} »...`);
-    const record = await generateOne(selectedBook, selectedChapter, 'chapter');
-    if (record) {
-      showToast(`Audio IA prêt ! Démarrage de l'écoute.`);
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.currentTime = 0;
-          void audioRef.current.play().catch(() => undefined);
-          setAudioPlaying(true);
-        }
-      }, 300);
-    }
-  }
-
   function togglePlayPause(): void {
     if (playableAudioUrl && audioRef.current) {
       if (audioPlaying) {
         audioRef.current.pause();
       } else {
-        stopSpeech();
         void audioRef.current.play().catch(e => {
           console.error('Audio playback error:', e);
         });
       }
     } else {
-      void generateCurrentAndPlay();
+      showToast('Pas encore d’audio pour ce chapitre. Choisis une voix avant de lancer la génération.');
+      setTab('export');
     }
   }
 
@@ -934,7 +872,6 @@ export default function AudiobookApp() {
       // Génération par petits segments : fiable avec les limites d'exécution Netlify.
       const result = await synthesizeChapter(
         clean,
-        settings.voiceId,
         (progress, label) => setGeneration({ active: true, progress, label, mode: 'chapter' }),
         () => false,
         settings.apiKey,
@@ -1033,8 +970,6 @@ export default function AudiobookApp() {
       const target = Math.max(0, Math.min(audioDuration, (audioRef.current.currentTime || 0) + seconds));
       audioRef.current.currentTime = target;
       setAudioCurrentTime(target);
-    } else if (speechState === 'playing') {
-      showToast(seconds > 0 ? '+15s (disponible sur l’audio généré)' : '-15s (disponible sur l’audio généré)');
     }
   }
 
@@ -1054,11 +989,11 @@ export default function AudiobookApp() {
       setAudioCurrentTime(0);
       if (autoStart) {
         setTimeout(() => {
-          if (audioRef.current && (next.audioUrl || audioMap[next.id])) {
+          if (audioRef.current && ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id])))) {
             void audioRef.current.play().catch(() => undefined);
             setAudioPlaying(true);
           } else {
-            void generateCurrentAndPlay();
+            showToast('Le chapitre suivant n’a pas encore été généré.');
           }
         }, 280);
       }
@@ -1077,91 +1012,10 @@ export default function AudiobookApp() {
     }
   }
 
-  function toggleInstantSpeech(): void {
-    if (!selectedChapter) return;
-    if (!('speechSynthesis' in window)) {
-      showToast(
-        'La lecture vocale système n’est pas disponible dans ce navigateur.',
-        true
-      );
-      return;
-    }
-    if (speechState === 'playing') {
-      window.speechSynthesis.pause();
-      setSpeechState('paused');
-      return;
-    }
-    if (speechState === 'paused') {
-      window.speechSynthesis.resume();
-      setSpeechState('playing');
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(selectedChapter.text);
-    utterance.rate = settings.rate;
-    const voice =
-      systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ??
-      systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
-    if (voice) utterance.voice = voice;
-    utterance.onboundary = (event: SpeechSynthesisEvent) => {
-      setSpeechProgress(
-        Math.min(
-          100,
-          Math.round(
-            (event.charIndex / Math.max(1, selectedChapter.text.length)) * 100
-          )
-        )
-      );
-    };
-    utterance.onend = () => {
-      setSpeechState('idle');
-      setSpeechProgress(100);
-    };
-    utterance.onerror = () => {
-      setSpeechState('idle');
-      showToast('La voix système a interrompu la lecture.', true);
-    };
-    window.speechSynthesis.speak(utterance);
-    setSpeechState('playing');
-  }
-
   async function ensureVoiceReady(): Promise<boolean> {
-    const activeKey =
-      settings.apiKey?.trim() ||
-      localStorage.getItem('auralis_api_key') ||
-      localStorage.getItem('auralis_gemini_api_key') ||
-      undefined;
-    if (await isRemoteTtsAvailable(false, activeKey)) return true;
-    if (storedVoices.includes(settings.voiceId)) return true;
-    setGeneration({
-      active: true,
-      progress: 0,
-      label: 'Téléchargement du modèle vocal local',
-      mode: 'voice',
-    });
-    try {
-      await downloadVoice(settings.voiceId, progress =>
-        setGeneration({
-          active: true,
-          progress,
-          label: `Téléchargement de la voix · ${progress} %`,
-          mode: 'voice',
-        })
-      );
-      const stored = await getStoredVoices();
-      setStoredVoices(stored);
-      return true;
-    } catch (error) {
-      showToast(
-        error instanceof Error
-          ? error.message
-          : 'Impossible de télécharger la voix locale.',
-        true
-      );
-      return false;
-    } finally {
-      setGeneration(null);
-    }
+    if (await isRemoteTtsAvailable(false, settings.apiKey)) return true;
+    showToast('Le fournisseur IA est indisponible sur Netlify. Vérifie sa configuration.', true);
+    return false;
   }
 
   async function generateOne(
@@ -1181,12 +1035,12 @@ export default function AudiobookApp() {
     try {
       const result = await synthesizeChapter(
         chapter.text,
-        settings.voiceId,
         (progress, label) =>
           setGeneration({ active: true, progress, label, mode }),
         () => cancelGeneration.current,
         settings.apiKey,
-        settings.cloudVoice
+        settings.cloudVoice,
+        { bookId: book.id, chapterId: chapter.id }
       );
       const record: AudioRecord = {
         id: `${book.id}:${chapter.id}`,
@@ -1198,6 +1052,8 @@ export default function AudiobookApp() {
         createdAt: Date.now(),
       };
       await putAudio(record);
+      // Only clear temporary segments AFTER the completed chapter is durable.
+      await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
       setAudioMap(current => ({ ...current, [chapter.id]: record }));
       return record;
     } catch (error) {
@@ -1214,26 +1070,7 @@ export default function AudiobookApp() {
   async function generateCurrent(): Promise<void> {
     if (!selectedBook || !selectedChapter) return;
     const record = await generateOne(selectedBook, selectedChapter, 'chapter');
-    if (record) showToast('Chapitre audio généré et enregistré localement.');
-  }
-
-  async function generateRemainingImportedBook(
-    book: Book,
-    startIndex: number
-  ): Promise<void> {
-    for (let index = startIndex; index < book.chapters.length; index += 1) {
-      if (cancelGeneration.current) return;
-      const chapter = book.chapters[index];
-      const record = await generateOne(book, chapter, 'book');
-      if (!record) {
-        showToast(
-          `Génération automatique interrompue au chapitre ${index + 1}. Tu peux la reprendre depuis « Générer & exporter ».`,
-          true
-        );
-        return;
-      }
-    }
-    showToast('✓ Livre audio complet généré automatiquement.');
+    if (record) showToast(`Chapitre prêt · ${audioSourceLabel(record.voiceId)}. Fichier sauvegardé sur cet appareil.`);
   }
 
   async function generateAll(): Promise<void> {
@@ -1241,13 +1078,10 @@ export default function AudiobookApp() {
     cancelGeneration.current = false;
     const ready = await ensureVoiceReady();
     if (!ready) return;
-    const remoteReady = await isRemoteTtsAvailable(false, settings.apiKey);
     const provider = settings.ttsProvider || 'gemini';
     const defaultCloudVoice =
       provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
-    const expectedVoiceId = remoteReady
-      ? `${provider}:${settings.cloudVoice || defaultCloudVoice}`
-      : `piper:${settings.voiceId}`;
+    const expectedVoiceId = `${provider}:${provider === 'deepinfra' && settings.cloudVoice === 'Kore' ? defaultCloudVoice : settings.cloudVoice || defaultCloudVoice}`;
     let completed = 0;
     for (let index = 0; index < selectedBook.chapters.length; index += 1) {
       if (cancelGeneration.current) break;
@@ -1275,7 +1109,7 @@ export default function AudiobookApp() {
     if (!selectedBook) return;
     const records = await getBookAudio(selectedBook.id);
     const map = Object.fromEntries(
-      records.map(record => [record.chapterId, record])
+      records.filter(isCloudGeneratedAudio).map(record => [record.chapterId, record])
     );
     const missing = selectedBook.chapters.filter(chapter => !map[chapter.id]);
     if (missing.length) {
@@ -1352,21 +1186,6 @@ export default function AudiobookApp() {
     showToast(deleteTarget.cloudJobId ? 'Livre supprimé de cet appareil et du cloud.' : 'Livre supprimé de cet appareil.');
   }
 
-  async function forgetVoice(): Promise<void> {
-    if (!storedVoices.includes(settings.voiceId)) return;
-    try {
-      await removeVoice(settings.voiceId);
-      await refreshVoiceData();
-      showToast('Modèle vocal supprimé du stockage local.');
-    } catch {
-      showToast('Impossible de supprimer ce modèle vocal.', true);
-    }
-  }
-
-  const frenchSystemVoices = systemVoices.filter(voice =>
-    voice.lang.toLowerCase().startsWith('fr')
-  );
-
   return (
     <div className="lv-app">
       <aside className="lv-sidebar">
@@ -1417,7 +1236,7 @@ export default function AudiobookApp() {
           <div className="lv-private-card">
             <LockKeyhole size={15} />
             <span>
-              Mode hybride : petits PDF sur l’appareil, gros livres traités progressivement dans le cloud.
+              Import local de PDF. Les voix et résumés IA sont générés uniquement sur demande.
             </span>
           </div>
         </div>
@@ -1510,13 +1329,13 @@ export default function AudiobookApp() {
             <section className="lv-empty">
               <div className="lv-hero">
                 <div className="lv-badge">
-                  <ShieldCheck size={13} /> Hybride · reprise progressive · streaming cloud
+                  <ShieldCheck size={13} /> PDF → chapitres → voix au choix → audio ou résumé
                 </div>
                 <h1>
                   Transforme ton PDF en <em>livre audio.</em>
                 </h1>
                 <p>
-                  Importe un livre : les petits PDF restent rapides en local et les gros ouvrages passent automatiquement dans le cloud, par blocs, pour garder l’interface fluide. Les premiers chapitres arrivent avant la fin du traitement.
+                  Importe ton livre sans attendre une génération audio. Parcours ses chapitres, choisis une voix Gemini et génère seulement ce que tu veux : un chapitre, tout le livre ou un résumé IA.
                 </p>
                 <div
                   className={`lv-drop ${dragging ? 'dragging' : ''}`}
@@ -1537,7 +1356,7 @@ export default function AudiobookApp() {
                     <FileText size={25} />
                   </div>
                   <strong>Dépose ton PDF ici</strong>
-                  <span>PDF texte, mixte ou scanné · gros fichiers envoyés par blocs reprenables</span>
+                  <span>PDF contenant du texte · l’import ne lance aucun audio</span>
                   <div className="lv-drop-actions">
                     <button
                       className="lv-primary"
@@ -1566,13 +1385,13 @@ export default function AudiobookApp() {
                     <strong>
                       <Zap size={14} /> OCR local
                     </strong>
-                    Les pages scannées sont détectées automatiquement ; le rendu reste léger et la transcription OCR est effectuée dans le cloud.
+                    Le texte sélectionnable est importé. Les PDF uniquement scannés nécessitent encore une transcription OCR.
                   </div>
                   <div className="lv-feature">
                     <strong>
                       <FileAudio size={14} /> Vrais fichiers WAV
                     </strong>
-                    Génère chaque chapitre avec Piper, puis exporte le livre
+                    Génère les chapitres avec Gemini, puis exporte le livre
                     complet dans une archive ZIP.
                   </div>
                 </div>
@@ -1596,12 +1415,23 @@ export default function AudiobookApp() {
                     </div>
                   </div>
                 </div>
-                <button
-                  className="lv-secondary"
-                  onClick={() => setDeleteTarget(selectedBook)}
-                >
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button className="lv-secondary" onClick={() => setSettingsOpen(true)}>
+                    <Settings size={14} /> Choisir la voix
+                  </button>
+                  <button className="lv-secondary" onClick={() => setTab('summary')}>
+                    <Brain size={14} /> Résumé IA
+                  </button>
+                  <button className="lv-primary" onClick={() => setTab('export')}>
+                    <WandSparkles size={14} /> Générer l’audio
+                  </button>
+                  <button
+                    className="lv-secondary"
+                    onClick={() => setDeleteTarget(selectedBook)}
+                  >
                   <Trash2 size={14} /> Supprimer
-                </button>
+                  </button>
+                </div>
               </section>
 
               {/* Bannière de reprise automatique */}
@@ -1675,7 +1505,6 @@ export default function AudiobookApp() {
                         key={chapter.id}
                         className={`lv-chapter-row ${selectedChapter.id === chapter.id ? 'active' : ''}`}
                         onClick={() => {
-                          stopSpeech();
                           setChapterId(chapter.id);
                         }}
                       >
@@ -1703,7 +1532,9 @@ export default function AudiobookApp() {
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                           <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
                             <Volume2 size={12} />
-                            {playableAudioUrl ? 'Audio HD généré' : 'Voix système directe'}
+                            {currentAudio ? audioSourceLabel(currentAudio.voiceId) :
+                              selectedChapter.audioUrl ? 'Audio distant (fournisseur non identifié)' :
+                              'Audio non généré'}
                           </span>
                           <button
                             className="lv-icon-button"
@@ -1718,7 +1549,7 @@ export default function AudiobookApp() {
                         {paragraphs.map((para, idx) => (
                           <p
                             key={idx}
-                            className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                            className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying) ? 'active' : ''}`}
                             onClick={() => {
                               if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                                 const targetSec = (idx / paragraphs.length) * audioDuration;
@@ -1738,7 +1569,7 @@ export default function AudiobookApp() {
                       <div className="lv-player-header">
                         <div className="lv-player-track-info">
                           <div className="lv-player-cover">
-                            {audioPlaying || speechState === 'playing' ? (
+                            {audioPlaying ? (
                               <div className="lv-eq-bars">
                                 <span className="lv-eq-bar" />
                                 <span className="lv-eq-bar" />
@@ -1769,18 +1600,14 @@ export default function AudiobookApp() {
                       {/* Scrubber Timeline */}
                       <div className="lv-scrubber-container">
                         <span className="lv-time-display">
-                          {playableAudioUrl
-                            ? formatTime(audioCurrentTime)
-                            : speechProgress > 0
-                              ? `${speechProgress}%`
-                              : '0:00'}
+                          {playableAudioUrl ? formatTime(audioCurrentTime) : '0:00'}
                         </span>
                         <input
                           type="range"
                           min={0}
                           max={playableAudioUrl ? (audioDuration || 1) : 100}
                           step={playableAudioUrl ? 0.5 : 1}
-                          value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                          value={playableAudioUrl ? audioCurrentTime : 0}
                           onChange={e => {
                             if (playableAudioUrl) {
                               seekTo(Number(e.target.value));
@@ -1821,11 +1648,11 @@ export default function AudiobookApp() {
 
                         <button
                           className="lv-ctrl-btn-play"
-                          title={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire l’audio'}
+                          title={audioPlaying ? 'Mettre en pause' : 'Lire l’audio'}
                           onClick={togglePlayPause}
-                          aria-label={audioPlaying || speechState === 'playing' ? 'Mettre en pause' : 'Lire'}
+                          aria-label={audioPlaying ? 'Mettre en pause' : 'Lire'}
                         >
-                          {audioPlaying || speechState === 'playing' ? (
+                          {audioPlaying ? (
                             <Pause size={24} fill="currentColor" />
                           ) : (
                             <Play size={24} fill="currentColor" style={{ marginLeft: '2px' }} />
@@ -1883,16 +1710,7 @@ export default function AudiobookApp() {
                             <span>Résumé IA</span>
                           </button>
 
-                          <button
-                            type="button"
-                            className="lv-icon-button"
-                            style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
-                            onClick={toggleInstantSpeech}
-                            title="Synthèse vocale système instantanée (sans génération)"
-                          >
-                            <Volume2 size={13} />
-                            <span>{speechState === 'playing' ? 'Pause directe' : 'Voix directe'}</span>
-                          </button>
+
 
                           <select
                             aria-label="Minuterie de veille"
@@ -1933,37 +1751,7 @@ export default function AudiobookApp() {
                       </div>
                     </div>
 
-                    <audio
-                      ref={audioRef}
-                      src={playableAudioUrl || undefined}
-                      style={{ display: 'none' }}
-                      onTimeUpdate={() => {
-                        if (audioRef.current) {
-                          setAudioCurrentTime(audioRef.current.currentTime);
-                          setAudioDuration(audioRef.current.duration || 0);
-                        }
-                      }}
-                      onLoadedMetadata={() => {
-                        if (audioRef.current) {
-                          setAudioDuration(audioRef.current.duration || 0);
-                          audioRef.current.playbackRate = settings.rate;
-                        }
-                      }}
-                      onPlay={() => {
-                        setAudioPlaying(true);
-                        window.speechSynthesis?.cancel();
-                        setSpeechState('idle');
-                      }}
-                      onPause={() => {
-                        setAudioPlaying(false);
-                      }}
-                      onEnded={() => {
-                        setAudioPlaying(false);
-                        if (autoPlayNext) {
-                          goToNextChapter(true);
-                        }
-                      }}
-                    />
+
                   </div>
                 </section>
               )}
@@ -1978,7 +1766,7 @@ export default function AudiobookApp() {
                       <p>
                         {chapter.words.toLocaleString('fr-FR')} mots · environ{' '}
                         {chapter.estimatedMinutes} min ·{' '}
-                        {chapter.audioUrl ? 'audio cloud prêt' : audioMap[chapter.id] ? 'audio local généré' : 'pas encore généré'}
+                        {chapter.audioUrl ? 'audio cloud prêt' : audioMap[chapter.id] ? audioSourceLabel(audioMap[chapter.id].voiceId) : 'pas encore généré'}
                       </p>
                       <div className="lv-card-actions">
                         <button
@@ -2120,10 +1908,10 @@ export default function AudiobookApp() {
                 <section className="lv-export-stack">
                   <div className="lv-card lv-export-hero">
                     <div className="lv-badge">
-                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : 'Moteur neuronal local Piper'}
+                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : `Moteur IA sélectionné · ${settings.ttsProvider || 'gemini'}`}
                     </div>
                     <h2>{isCloudBook ? 'Livre audio progressif dans le cloud' : 'Génère le vrai livre audio'}</h2>
-                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Au premier lancement, le modèle vocal choisi est téléchargé puis conservé dans le stockage privé du navigateur. Le mode local reste disponible pour les petits documents et comme secours.'}</p>
+                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis ta voix Gemini dans les réglages, puis génère ce chapitre ou tout le livre. La génération est toujours volontaire ; les fichiers audio restent enregistrés sur cet appareil.'}</p>
                     <div className="lv-stat-grid">
                       <div className="lv-stat">
                         <strong>
@@ -2133,9 +1921,9 @@ export default function AudiobookApp() {
                       </div>
                       <div className="lv-stat">
                         <strong>
-                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'Secours') : (storedVoices.includes(settings.voiceId) ? 'Oui' : 'Non')}
+                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'En attente') : (settings.ttsProvider || 'Gemini')}
                         </strong>
-                        <span>{isCloudBook ? 'moteur cloud' : 'voix en cache'}</span>
+                        <span>{isCloudBook ? 'moteur IA distant' : 'fournisseur IA'}</span>
                       </div>
                       <div className="lv-stat">
                         <strong>{isCloudBook ? `${selectedBook.cloudAudioReady ?? 0}` : 'WAV'}</strong>
@@ -2143,12 +1931,17 @@ export default function AudiobookApp() {
                       </div>
                     </div>
                     <div className="lv-export-actions">
+                      {!isCloudBook && (
+                        <button className="lv-secondary" style={{ width: 'auto' }} onClick={() => setSettingsOpen(true)}>
+                          <Settings size={15} /> Choisir la voix
+                        </button>
+                      )}
                       {isCloudBook ? (
                         <>
                           <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
                             <RotateCcw size={15} /> Reprendre le traitement cloud
                           </button>
-                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre en local</button>}
+                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre via IA</button>}
                         </>
                       ) : (
                         <>
@@ -2170,7 +1963,7 @@ export default function AudiobookApp() {
                             style={{ width: `${generation.progress}%` }}
                           />
                         </div>
-                        {generation.mode === 'book' && (
+                        {(generation.mode === 'book' || generation.mode === 'chapter') && (
                           <button
                             className="lv-ghost lv-danger"
                             style={{ marginTop: 10 }}
@@ -2194,7 +1987,7 @@ export default function AudiobookApp() {
                           <span>{chapter.words} mots</span>
                         </div>
                         <span>
-                          {chapter.audioUrl || audioMap[chapter.id] ? 'Prêt' : 'À générer'}
+                          {chapter.audioUrl ? 'Audio cloud prêt' : audioMap[chapter.id] ? audioSourceLabel(audioMap[chapter.id].voiceId) : 'À générer'}
                         </span>
                         <div className="lv-table-actions">
                           {chapter.audioUrl ? (
@@ -2295,7 +2088,7 @@ export default function AudiobookApp() {
             if (event.currentTarget === event.target) setSettingsOpen(false);
           }}
         >
-          <div className="lv-card lv-modal">
+          <div className="lv-card lv-modal lv-settings-modal" role="dialog" aria-modal="true" aria-label="Réglages Auralis">
             <div
               style={{
                 display: 'flex',
@@ -2317,28 +2110,60 @@ export default function AudiobookApp() {
               <label htmlFor="cloud-voice">
                 {(settings.ttsProvider || 'gemini') === 'gemini'
                   ? 'Voix Gemini'
-                  : 'Voix Cloud'}
+                  : (settings.ttsProvider === 'deepinfra' ? 'Voix Kokoro · DeepInfra' : 'Voix Cloud')}
               </label>
-              <select
-                id="cloud-voice"
-                className="lv-select"
-                value={settings.cloudVoice || 'Kore'}
-                onChange={event =>
-                  setSettings(current => ({
-                    ...current,
-                    cloudVoice: event.target.value,
-                  }))
-                }
-              >
-                {((settings.ttsProvider || 'gemini') === 'gemini'
-                  ? geminiVoiceOptions
-                  : CLOUD_VOICES
-                ).map(voice => (
-                  <option key={voice.id} value={voice.id}>
-                    {voice.label}
-                  </option>
-                ))}
-              </select>
+              <details style={{ position: 'relative', width: '100%' }}>
+                <summary
+                  className="lv-select"
+                  aria-label="Choisir une voix de synthèse"
+                  style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+                >
+                  <span>{((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : settings.ttsProvider === 'deepinfra' ? KOKORO_VOICES : [{ id: 'Lea', label: 'Léa · Français (Polly)', displayName: 'Léa' }])
+                    .find(voice => voice.id === (settings.cloudVoice || 'Kore'))?.label || settings.cloudVoice || 'Kore'}</span>
+                  <ChevronRight size={16} style={{ transform: 'rotate(90deg)', flexShrink: 0 }} />
+                </summary>
+                <div
+                  role="listbox"
+                  aria-label="Voix disponibles"
+                  style={{
+                    maxHeight: 'min(270px, 45vh)',
+                    overflowY: 'auto',
+                    overscrollBehavior: 'contain',
+                    background: '#182433',
+                    border: '1px solid rgba(167, 139, 250, 0.45)',
+                    borderRadius: 12,
+                    padding: 6,
+                    marginTop: 6,
+                    boxShadow: '0 12px 28px rgba(0,0,0,.35)',
+                  }}
+                >
+                  {((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : settings.ttsProvider === 'deepinfra' ? KOKORO_VOICES : [{ id: 'Lea', label: 'Léa · Français (Polly)', displayName: 'Léa' }]).map(voice => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={(settings.cloudVoice || 'Kore') === voice.id}
+                      key={voice.id}
+                      onClick={event => {
+                        setSettings(current => ({ ...current, cloudVoice: voice.id }));
+                        event.currentTarget.closest('details')?.removeAttribute('open');
+                      }}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '10px 12px',
+                        borderRadius: 8,
+                        border: 'none',
+                        color: '#f8fafc',
+                        cursor: 'pointer',
+                        background: (settings.cloudVoice || 'Kore') === voice.id ? '#53407a' : 'transparent',
+                      }}
+                    >
+                      {voice.label}
+                    </button>
+                  ))}
+                </div>
+              </details>
 
               {(settings.ttsProvider || 'gemini') === 'gemini' && (
                 <>
@@ -2372,84 +2197,6 @@ export default function AudiobookApp() {
               </p>
             </div>
 
-            <div className="lv-field">
-              <label htmlFor="neural-voice">Voix locale Piper (Secours & Hors-ligne)</label>
-              <select
-                id="neural-voice"
-                className="lv-select"
-                value={settings.voiceId}
-                onChange={event =>
-                  setSettings(current => ({
-                    ...current,
-                    voiceId: event.target.value,
-                  }))
-                }
-              >
-                {(voiceCatalog.length
-                  ? voiceCatalog
-                  : [
-                      {
-                        id: settings.voiceId,
-                        label: settings.voiceId,
-                        language: 'Français',
-                      },
-                    ]
-                ).map(voice => (
-                  <option key={voice.id} value={voice.id}>
-                    {voice.language} · {voice.label}
-                  </option>
-                ))}
-              </select>
-              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                {storedVoices.includes(settings.voiceId)
-                  ? '✓ Cette voix locale est enregistrée dans votre navigateur.'
-                  : 'Téléchargée automatiquement lors de la première génération locale.'}
-              </p>
-            </div>
-
-            <div className="lv-field">
-              <label htmlFor="system-voice">
-                Voix système (Pour le bouton « Écouter » instantané)
-              </label>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <select
-                  id="system-voice"
-                  className="lv-select"
-                  style={{ flex: 1 }}
-                  value={settings.systemVoiceUri}
-                  onChange={event =>
-                    setSettings(current => ({
-                      ...current,
-                      systemVoiceUri: event.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Automatique (meilleure voix française)</option>
-                  {frenchSystemVoices.map(voice => (
-                    <option key={voice.voiceURI} value={voice.voiceURI}>
-                      {voice.name} ({voice.lang})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="lv-secondary"
-                  style={{ width: 'auto', whiteSpace: 'nowrap' }}
-                  onClick={() => {
-                    if (!('speechSynthesis' in window)) return;
-                    window.speechSynthesis.cancel();
-                    const utt = new SpeechSynthesisUtterance('Bonjour ! Ceci est un aperçu de la voix pour votre livre audio.');
-                    utt.rate = settings.rate;
-                    const v = systemVoices.find(item => item.voiceURI === settings.systemVoiceUri) ||
-                              systemVoices.find(item => item.lang.toLowerCase().startsWith('fr'));
-                    if (v) utt.voice = v;
-                    window.speechSynthesis.speak(utt);
-                  }}
-                >
-                  Tester
-                </button>
-              </div>
-            </div>
             <div className="lv-field">
               <label htmlFor="ocr-lang">Langue OCR</label>
               <select
@@ -2494,14 +2241,12 @@ export default function AudiobookApp() {
                 value={settings.ttsProvider || 'gemini'}
                 onChange={event => {
                   const provider = event.target.value as AppSettings['ttsProvider'];
-                  setSettings(current => ({ ...current, ttsProvider: provider }));
+                  setSettings(current => ({ ...current, ttsProvider: provider, cloudVoice: provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore', apiKey: '' }));
                   setKeyTestStatus('idle');
                   setKeyTestError(null);
                 }}
               >
-                <option value="deepinfra">DeepInfra · Kokoro (économique)</option>
-                <option value="gemini">Google IA</option>
-                <option value="aws-polly">Amazon Polly</option>
+                <option value="deepinfra">Kokoro · DeepInfra (voix IA cloud)</option>
               </select>
             </div>
 
@@ -2572,14 +2317,6 @@ export default function AudiobookApp() {
               </p>
             </div>
             <div className="lv-modal-actions">
-              {storedVoices.includes(settings.voiceId) && (
-                <button
-                  className="lv-ghost lv-danger"
-                  onClick={() => void forgetVoice()}
-                >
-                  <Trash2 size={13} /> Oublier cette voix
-                </button>
-              )}
               <button
                 className="lv-primary"
                 style={{ width: 'auto' }}
@@ -2847,12 +2584,43 @@ export default function AudiobookApp() {
         </div>
       )}
 
+      {/* Lecteur cloud persistant : reste monté pendant la navigation, comme Spotify. */}
+                    <audio
+                      ref={audioRef}
+                      src={playableAudioUrl || undefined}
+                      style={{ display: 'none' }}
+                      onTimeUpdate={() => {
+                        if (audioRef.current) {
+                          setAudioCurrentTime(audioRef.current.currentTime);
+                          setAudioDuration(audioRef.current.duration || 0);
+                        }
+                      }}
+                      onLoadedMetadata={() => {
+                        if (audioRef.current) {
+                          setAudioDuration(audioRef.current.duration || 0);
+                          audioRef.current.playbackRate = settings.rate;
+                        }
+                      }}
+                      onPlay={() => {
+                        setAudioPlaying(true);
+                      }}
+                      onPause={() => {
+                        setAudioPlaying(false);
+                      }}
+                      onEnded={() => {
+                        setAudioPlaying(false);
+                        if (autoPlayNext) {
+                          goToNextChapter(true);
+                        }
+                      }}
+                    />
+
       {/* Barre de lecture fixe en bas d'écran (Sticky Docked Player) uniquement hors onglet lecteur */}
-      {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying || speechState === 'playing') && !dockedDismissed && (
+      {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying) && !dockedDismissed && (
         <div className="lv-docked-player">
           <div className="lv-docked-left">
             <div className="lv-player-cover" style={{ width: '38px', height: '38px', borderRadius: '10px' }}>
-              {audioPlaying || speechState === 'playing' ? (
+              {audioPlaying ? (
                 <div className="lv-eq-bars" style={{ height: '12px' }}>
                   <span className="lv-eq-bar" />
                   <span className="lv-eq-bar" />
@@ -2876,8 +2644,8 @@ export default function AudiobookApp() {
               <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(-15)} title="-15s">
                 <RotateCcw size={13} />
               </button>
-              <button className="lv-ctrl-btn-play" style={{ width: '40px', height: '40px' }} onClick={togglePlayPause} title={audioPlaying || speechState === 'playing' ? 'Pause' : 'Lecture'}>
-                {audioPlaying || speechState === 'playing' ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
+              <button className="lv-ctrl-btn-play" style={{ width: '40px', height: '40px' }} onClick={togglePlayPause} title={audioPlaying ? 'Pause' : 'Lecture'}>
+                {audioPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" style={{ marginLeft: '2px' }} />}
               </button>
               <button className="lv-ctrl-btn" style={{ width: '32px', height: '32px' }} onClick={() => handleSkip(15)} title="+15s">
                 <RotateCw size={13} />
@@ -2890,7 +2658,7 @@ export default function AudiobookApp() {
 
           <div className="lv-docked-right">
             <span className="lv-time-display" style={{ fontSize: '11px' }}>
-              {playableAudioUrl ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)}` : `${speechProgress}%`}
+              {playableAudioUrl ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration || selectedChapter.estimatedMinutes * 60)}` : '0:00'}
             </span>
             <button className="lv-icon-button" title="Ouvrir le lecteur complet" onClick={() => setTab('listen')}>
               <Headphones size={15} />
@@ -2914,7 +2682,8 @@ export default function AudiobookApp() {
             </button>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
-                <Volume2 size={13} /> {playableAudioUrl ? 'Audio HD' : 'Voix système directe'}
+                <Volume2 size={13} /> {currentAudio ? audioSourceLabel(currentAudio.voiceId) :
+                  playableAudioUrl ? 'Audio distant' : 'Audio non généré'}
               </span>
               {sleepRemainingSeconds !== null && (
                 <span className="lv-player-mode-tag" style={{ color: '#fbbf24', borderColor: 'rgba(251, 191, 36, 0.4)' }}>
@@ -2927,7 +2696,7 @@ export default function AudiobookApp() {
           <div className="lv-immersive-body">
             <div className="lv-immersive-artwork">
               <div className="lv-immersive-artwork-glow" />
-              {audioPlaying || speechState === 'playing' ? (
+              {audioPlaying ? (
                 <div className="lv-eq-bars" style={{ height: '40px', gap: '8px' }}>
                   <span className="lv-eq-bar" style={{ width: '6px' }} />
                   <span className="lv-eq-bar" style={{ width: '6px' }} />
@@ -2947,13 +2716,13 @@ export default function AudiobookApp() {
 
             <div className="lv-immersive-controls">
               <div className="lv-scrubber-container">
-                <span className="lv-time-display">{playableAudioUrl ? formatTime(audioCurrentTime) : `${speechProgress}%`}</span>
+                <span className="lv-time-display">{playableAudioUrl ? formatTime(audioCurrentTime) : '0:00'}</span>
                 <input
                   type="range"
                   min={0}
                   max={playableAudioUrl ? (audioDuration || 1) : 100}
                   step={playableAudioUrl ? 0.5 : 1}
-                  value={playableAudioUrl ? audioCurrentTime : speechProgress}
+                  value={playableAudioUrl ? audioCurrentTime : 0}
                   onChange={e => {
                     if (playableAudioUrl) seekTo(Number(e.target.value));
                   }}
@@ -2974,7 +2743,7 @@ export default function AudiobookApp() {
                   <span className="lv-skip-label">15</span>
                 </button>
                 <button className="lv-ctrl-btn-play" style={{ width: '68px', height: '68px' }} onClick={togglePlayPause}>
-                  {audioPlaying || speechState === 'playing' ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: '3px' }} />}
+                  {audioPlaying ? <Pause size={30} fill="currentColor" /> : <Play size={30} fill="currentColor" style={{ marginLeft: '3px' }} />}
                 </button>
                 <button className="lv-ctrl-btn" style={{ width: '48px', height: '48px' }} onClick={() => handleSkip(15)} title="+15s">
                   <RotateCw size={18} />
@@ -2984,13 +2753,27 @@ export default function AudiobookApp() {
                   <SkipForward size={20} />
                 </button>
               </div>
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '12px', marginTop: '16px', flexWrap: 'wrap' }}>
+                <label htmlFor="immersive-playback-speed" style={{ color: '#cbd5e1', fontSize: '13px' }}>Vitesse de lecture</label>
+                <select
+                  id="immersive-playback-speed"
+                  aria-label="Accélérer ou ralentir la lecture"
+                  className="lv-rate"
+                  value={settings.rate}
+                  onChange={event => updateRate(Number(event.target.value))}
+                >
+                  {SPEEDS.map(rate => (
+                    <option key={rate} value={rate}>{rate}×</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="lv-immersive-reader">
               {paragraphs.map((para, idx) => (
                 <p
                   key={idx}
-                  className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying || speechState === 'playing') ? 'active' : ''}`}
+                  className={`lv-paragraph-item ${idx === activeParagraphIndex && (audioPlaying) ? 'active' : ''}`}
                   onClick={() => {
                     if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                       const targetSec = (idx / paragraphs.length) * audioDuration;

@@ -15,6 +15,7 @@ type PdfResult = {
   text: string;
   pages: number;
   ocrUsed: boolean;
+  outlineChapters?: Array<{ title: string; text: string }>;
 };
 
 type PdfPasswordUpdater = (password: string | Error) => void;
@@ -142,6 +143,104 @@ export async function renderPdfPageImage(
   }
 }
 
+/**
+ * Recognize chapter numbers printed as "– 1 –" / "– 2 –" at the start
+ * of a page. These are real chapter markers, not technical audio chunks.
+ */
+function sectionsFromPrintedChapterNumbers(
+  pages: string[]
+): Array<{ title: string; text: string }> | undefined {
+  type Candidate = { number: number; page: number; title: string };
+  const found: Candidate[] = [];
+  for (let page = 0; page < pages.length; page++) {
+    const start = (pages[page] || '').slice(0, 850);
+    const match = /[–—-]\s*(\d{1,2})\s*[–—-]/.exec(start);
+    if (!match || match.index > 160) continue;
+    const number = Number(match[1]);
+    if (number < 1 || number > 60) continue;
+    const remainder = start.slice(match.index + match[0].length).trim();
+    let title = remainder.split('\n').find(Boolean)?.trim() || '';
+    title = title.replace(/\s+/g, ' ').trim();
+    if (title.length < 4 || title.length > 100) title = 'Chapitre ' + number;
+    found.push({ number, page, title });
+  }
+
+  // Accept only a consecutive sequence beginning at 1, on separate pages.
+  const numbered: Candidate[] = [];
+  for (const item of found) {
+    if (item.number !== numbered.length + 1) continue;
+    if (numbered.length && item.page - numbered[numbered.length - 1].page < 2) continue;
+    numbered.push(item);
+  }
+  if (numbered.length < 3 || numbered.length > 50) return undefined;
+
+  const chapters: Array<{ title: string; text: string }> = [];
+  for (let i = 0; i < numbered.length; i++) {
+    const current = numbered[i];
+    const until = numbered[i + 1]?.page ?? pages.length;
+    const body = pages.slice(current.page, until).join('\n\n').trim();
+    if (body.length >= 250) chapters.push({ title: current.title, text: body });
+  }
+  return chapters.length === numbered.length ? chapters : undefined;
+}
+
+/**
+ * Recover actual chapter boundaries from a PDF's built-in bookmarks.
+ * PDF bookmarks are author metadata, unlike arbitrary reading-size chunks.
+ * Reject suspicious outlines containing every page/paragraph.
+ */
+async function sectionsFromOutline(
+  pdfDocument: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>,
+  pageTexts: string[]
+): Promise<Array<{ title: string; text: string }> | undefined> {
+  try {
+    const outline = await pdfDocument.getOutline();
+    if (!outline?.length) return undefined;
+    const top = outline;
+    const child = top.flatMap(item => item.items || []);
+    const candidates = [top, child].filter(items => items.length >= 2 && items.length <= 55);
+
+    for (const items of candidates) {
+      const pageEntries: Array<{ page: number; title: string }> = [];
+      for (const item of items) {
+        const dest = typeof item.dest === 'string'
+          ? await pdfDocument.getDestination(item.dest)
+          : item.dest;
+        if (!dest?.length) continue;
+        const ref = dest[0];
+        const page = typeof ref === 'number' ? ref : await pdfDocument.getPageIndex(ref);
+        if (!Number.isInteger(page) || page < 0 || page >= pdfDocument.numPages) continue;
+        const title = item.title?.replace(/\s+/g, ' ').trim() || '';
+        if (!title || /^page\s+\d+$/i.test(title)) continue;
+        pageEntries.push({ page, title });
+      }
+      pageEntries.sort((a, b) => a.page - b.page);
+      const unique = pageEntries.filter((item, index) => !index || item.page > pageEntries[index - 1].page);
+      const maxChapters = Math.min(50, Math.max(8, Math.floor(pdfDocument.numPages / 4)));
+      if (unique.length < 2 || unique.length > maxChapters) continue;
+      const pageGaps = unique.slice(1).map((item, i) => item.page - unique[i].page);
+      const tinyGaps = pageGaps.filter(gap => gap < 2).length;
+      if (tinyGaps > Math.max(1, Math.floor(pageGaps.length * 0.2))) continue;
+
+      const sections: Array<{ title: string; text: string }> = [];
+      if (unique[0].page > 0) {
+        const intro = pageTexts.slice(0, unique[0].page).join('\n\n').trim();
+        if (intro.length > 200) sections.push({ title: 'Pages préliminaires', text: intro });
+      }
+      for (let i = 0; i < unique.length; i++) {
+        const current = unique[i];
+        const next = unique[i + 1]?.page ?? pageTexts.length;
+        const chapterText = pageTexts.slice(current.page, next).join('\n\n').trim();
+        if (chapterText.length >= 200) sections.push({ title: current.title, text: chapterText });
+      }
+      if (sections.length >= 2) return sections;
+    }
+  } catch (error) {
+    console.warn('Sommaire PDF non exploitable, analyse des vrais titres du texte.', error);
+  }
+  return undefined;
+}
+
 export async function extractPdf(
   file: File,
   options: PdfOptions,
@@ -174,6 +273,9 @@ export async function extractPdf(
 
   try {
     const pdfDocument = await loadingTask.promise;
+    // Preserve the original page indices for bookmark-based chapter boundaries.
+    pageTexts.length = pdfDocument.numPages;
+    pageTexts.fill('');
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       const page = await pdfDocument.getPage(pageNumber);
@@ -184,7 +286,7 @@ export async function extractPdf(
         // Auralis lit uniquement le vrai texte du PDF.
         // Les images, illustrations et pages scannées sans couche texte sont ignorées.
         if (pageText.replace(/\s/g, '').length >= 20) {
-          pageTexts.push(pageText);
+          pageTexts[pageNumber - 1] = pageText;
         }
 
         onProgress({
@@ -201,10 +303,15 @@ export async function extractPdf(
       progress: 95,
     });
 
+    // Printed chapter markers take priority over bookmark collections.
+    const outlineChapters =
+      sectionsFromPrintedChapterNumbers(pageTexts) ??
+      await sectionsFromOutline(pdfDocument, pageTexts);
     return {
       text: pageTexts.join('\n\n'),
       pages: pdfDocument.numPages,
       ocrUsed: false,
+      outlineChapters,
     };
   } finally {
     cleanup();

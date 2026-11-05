@@ -1,9 +1,20 @@
 import type { AudioRecord, Book } from '../types';
 
 const DB_NAME = 'livrevox-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const BOOKS = 'books';
 const AUDIO = 'audio';
+const SPEECH_SEGMENTS = 'speech_segments';
+
+export type SavedSpeechSegment = {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  voiceId: string;
+  index: number;
+  textHash: string;
+  blob: Blob;
+};
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -15,6 +26,11 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(AUDIO)) {
         const store = db.createObjectStore(AUDIO, { keyPath: 'id' });
         store.createIndex('bookId', 'bookId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(SPEECH_SEGMENTS)) {
+        const store = db.createObjectStore(SPEECH_SEGMENTS, { keyPath: 'id' });
+        store.createIndex('bookId', 'bookId', { unique: false });
+        store.createIndex('chapterId', 'chapterId', { unique: false });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -63,26 +79,30 @@ export async function putBook(book: Book): Promise<void> {
 
 export async function deleteBook(bookId: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([BOOKS, AUDIO], 'readwrite');
-  tx.objectStore(BOOKS).delete(bookId);
-  const audioStore = tx.objectStore(AUDIO);
-  const index = audioStore.index('bookId');
-  const cursorRequest = index.openCursor(IDBKeyRange.only(bookId));
-  await new Promise<void>((resolve, reject) => {
-    cursorRequest.onsuccess = () => {
-      const cursor = cursorRequest.result;
-      if (!cursor) {
-        resolve();
-        return;
-      }
-      cursor.delete();
-      cursor.continue();
-    };
-    cursorRequest.onerror = () =>
-      reject(cursorRequest.error ?? new Error('Suppression audio échouée.'));
-  });
-  await transactionDone(tx);
-  db.close();
+  try {
+    const tx = db.transaction([BOOKS, AUDIO, SPEECH_SEGMENTS], 'readwrite');
+    const finished = transactionDone(tx);
+    tx.objectStore(BOOKS).delete(bookId);
+
+    function removeByBook(storeName: string): Promise<void> {
+      const cursorRequest = tx.objectStore(storeName)
+        .index('bookId').openCursor(IDBKeyRange.only(bookId));
+      return new Promise<void>((resolve, reject) => {
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return resolve();
+          cursor.delete();
+          cursor.continue();
+        };
+        cursorRequest.onerror = () => reject(cursorRequest.error ?? new Error('Suppression audio échouée.'));
+      });
+    }
+    // Queue both cursor operations before the IndexedDB transaction commits.
+    await Promise.all([removeByBook(AUDIO), removeByBook(SPEECH_SEGMENTS)]);
+    await finished;
+  } finally {
+    db.close();
+  }
 }
 
 export async function putAudio(record: AudioRecord): Promise<void> {
@@ -128,4 +148,51 @@ export async function deleteAudio(
   tx.objectStore(AUDIO).delete(`${bookId}:${chapterId}`);
   await transactionDone(tx);
   db.close();
+}
+
+/** Save each successfully generated Gemini segment before requesting the next. */
+export async function saveSpeechSegment(segment: SavedSpeechSegment): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SPEECH_SEGMENTS, 'readwrite');
+    tx.objectStore(SPEECH_SEGMENTS).put(segment);
+    await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+export async function getSpeechSegments(bookId: string, chapterId: string): Promise<SavedSpeechSegment[]> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SPEECH_SEGMENTS, 'readonly');
+    return await requestAsPromise(
+      tx.objectStore(SPEECH_SEGMENTS).index('chapterId')
+        .getAll(IDBKeyRange.only(chapterId)) as IDBRequest<SavedSpeechSegment[]>
+    ).then(segments => segments.filter(s => s.bookId === bookId));
+  } finally {
+    db.close();
+  }
+}
+
+export async function clearSpeechSegments(bookId: string, chapterId: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SPEECH_SEGMENTS, 'readwrite');
+    const finished = transactionDone(tx);
+    const store = tx.objectStore(SPEECH_SEGMENTS);
+    const cursorReq = store.index('chapterId').openCursor(IDBKeyRange.only(chapterId));
+    await new Promise<void>((resolve, reject) => {
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) return resolve();
+        if ((cursor.value as SavedSpeechSegment).bookId === bookId) cursor.delete();
+        cursor.continue();
+      };
+      cursorReq.onerror = () => reject(cursorReq.error ?? new Error('Suppression segments impossible.'));
+    });
+    await finished;
+  } finally {
+    db.close();
+  }
 }
