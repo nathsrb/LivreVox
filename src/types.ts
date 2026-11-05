@@ -42,13 +42,11 @@ export type AudioRecord = {
   createdAt: number;
 };
 
-export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly' | 'piper';
+export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly';
 
 export type AppSettings = {
   rate: number;
-  voiceId: string;
   cloudVoice?: string;
-  systemVoiceUri: string;
   ocrLang: 'fra' | 'eng' | 'fra+eng';
   autoOcr: boolean;
   ttsProvider?: TtsProvider;
