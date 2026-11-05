@@ -58,8 +58,12 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
   });
   if (!response.ok) throw new Error('Gemini TTS (' + response.status + '): ' + (await response.text()).slice(0,700));
   const data = await response.json() as any;
+  // Interactions API returns the audio directly as output_audio.data.
+  // Older shapes may still expose it through a step.
   const block = modern
-    ? (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : []).filter((c: any) => c?.type === 'audio' && c?.data).at(-1)
+    ? (data?.output_audio || data?.outputAudio ||
+        (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : [])
+          .filter((c: any) => c?.type === 'audio' && c?.data).at(-1))
     : data?.candidates?.[0]?.content?.parts?.find((p: any) => p?.inlineData?.data)?.inlineData;
   if (!block?.data) throw new Error('Le fournisseur Gemini n’a renvoyé aucun audio.');
   let buffer = Buffer.from(block.data, 'base64');
@@ -326,7 +330,12 @@ function classifyError(error: unknown) {
 }
 
 export default async function handler(request: Request): Promise<Response> {
-  const route = new URL(request.url).searchParams.get('route') || '';
+  const url = new URL(request.url);
+  // Netlify uses a custom path, so read /api/* from the original URL.
+  // Retain query-based routing for compatibility.
+  const route = url.pathname.startsWith('/api/')
+    ? url.pathname.slice('/api/'.length)
+    : (url.searchParams.get('route') || '');
   const path = '/api/' + route.replace(/^\/+/, '');
   const method = request.method.toUpperCase();
   if (method === 'OPTIONS') return new Response(null, {status: 204});
@@ -503,5 +512,7 @@ ${chapterText.slice(0, 48000)}`;
   return respond({error:'Route API non migrée.'},404);
 }
 export const config = {
+  // Serve the original /api/* URL directly instead of a rewrite that lost its route.
+  path: '/api/*',
   rateLimit: { action:'rate_limit', aggregateBy:['ip'],windowSize:60,windowLimit:90 }
 };
