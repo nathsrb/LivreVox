@@ -362,7 +362,7 @@ export async function synthesizeChapter(
     const cached = availableSegments.get(index);
     const progress = Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82);
 
-    if (cached?.textHash === signature && cached.blob?.size > 0) {
+    if (cached?.textHash === signature && cached.blob?.size > 0 && (provider !== 'deepinfra' || cached.blob.type.includes('wav'))) {
       remoteBlobs.push(cached.blob);
       reused++;
       onProgress(progress, `${providerLabel} · reprise du segment ${index + 1}/${remoteChunks.length} (${reused} sauvegardés)`);
