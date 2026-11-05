@@ -21,9 +21,10 @@ type ProviderCredentials = {
   region?: string;
 };
 
-function normalizeProvider(value?: string): ProviderName {
-  if (value === 'deepinfra' || value === 'aws-polly') return value;
-  return 'gemini';
+function normalizeProvider(_value?: string): ProviderName {
+  // Preview-only build: Kokoro via DeepInfra is the sole permitted generation provider.
+  // This also rejects stale Gemini preferences and any client-supplied override.
+  return 'deepinfra';
 }
 
 function sha256Hex(value: string): string {
