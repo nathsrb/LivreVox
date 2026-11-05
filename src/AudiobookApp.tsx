@@ -59,6 +59,7 @@ import {
   type CloudJobStatus,
 } from './lib/cloud';
 import {
+  clearSpeechSegments,
   deleteAudio,
   deleteBook,
   getBookAudio,
@@ -513,7 +514,9 @@ export default function AudiobookApp() {
       message.includes('RESOURCE_EXHAUSTED') ||
       message.includes('exceeded your current quota')
     ) {
-      cleanMessage = 'Limite de génération IA atteinte (429). Gemini n’a pas terminé le chapitre. Réessaie plus tard.';
+      // Preserve actionable details (remaining chunks and how to resume)
+      // instead of replacing every quota error with a generic warning.
+      cleanMessage = message.slice(0, 440);
     }
     setToast({ message: cleanMessage, error });
     window.setTimeout(() => setToast(null), 5500);
@@ -1030,7 +1033,8 @@ export default function AudiobookApp() {
           setGeneration({ active: true, progress, label, mode }),
         () => cancelGeneration.current,
         settings.apiKey,
-        settings.cloudVoice
+        settings.cloudVoice,
+        { bookId: book.id, chapterId: chapter.id }
       );
       const record: AudioRecord = {
         id: `${book.id}:${chapter.id}`,
@@ -1042,6 +1046,8 @@ export default function AudiobookApp() {
         createdAt: Date.now(),
       };
       await putAudio(record);
+      // Only clear temporary segments AFTER the completed chapter is durable.
+      await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
       setAudioMap(current => ({ ...current, [chapter.id]: record }));
       return record;
     } catch (error) {
@@ -1979,7 +1985,7 @@ export default function AudiobookApp() {
                             style={{ width: `${generation.progress}%` }}
                           />
                         </div>
-                        {generation.mode === 'book' && (
+                        {(generation.mode === 'book' || generation.mode === 'chapter') && (
                           <button
                             className="lv-ghost lv-danger"
                             style={{ marginTop: 10 }}
