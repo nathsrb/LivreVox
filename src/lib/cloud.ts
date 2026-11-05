@@ -54,7 +54,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export type StoredProviderConfig = {
-  provider: 'gemini' | 'deepinfra' | 'aws-polly';
+  provider: 'gemini' | 'deepinfra' | 'aws-polly' | 'piper';
   apiKey?: string;
   apiSecret?: string;
   region?: string;
