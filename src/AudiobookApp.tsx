@@ -183,7 +183,8 @@ function buildBook(
   sourceSize: number,
   pages: number,
   text: string,
-  ocrUsed: boolean
+  ocrUsed: boolean,
+  outlineChapters?: Array<{ title: string; text: string }>
 ): Book {
   const now = Date.now();
   return {
@@ -195,7 +196,7 @@ function buildBook(
     createdAt: now,
     updatedAt: now,
     ocrUsed,
-    chapters: splitIntoChapters(cleanExtractedText(text)),
+    chapters: splitIntoChapters(cleanExtractedText(text), outlineChapters),
     progress: {},
   };
 }
@@ -657,7 +658,7 @@ export default function AudiobookApp() {
     const cleaned = cleanExtractedText(result.text);
     if (cleaned.length < 120) throw new Error('Le PDF ne contient pas assez de texte exploitable.');
     const title = file.name.replace(/\.pdf$/i, '').trim() || 'Livre sans titre';
-    const book = buildBook(title, file.name, file.size, result.pages, cleaned, result.ocrUsed);
+    const book = buildBook(title, file.name, file.size, result.pages, cleaned, result.ocrUsed, result.outlineChapters);
     if (!book.chapters.length) throw new Error('Aucun chapitre exploitable n’a été détecté.');
     await putBook(book);
     setBooks(current => [book, ...current]);
@@ -667,7 +668,9 @@ export default function AudiobookApp() {
     // Import and narration must be separate. No paid API call occurs on upload.
     setTab('chapters');
     setImportProgress(null);
-    showToast(`Livre importé : ${book.chapters.length} section${book.chapters.length > 1 ? 's' : ''}. Choisis une voix, puis génère le chapitre souhaité ou un résumé IA.`);
+    showToast(book.chapters.length === 1 && book.chapters[0].title.includes('chapitres non détectés')
+      ? 'PDF importé, mais son sommaire ne permet pas de repérer les chapitres d’origine. Le texte est conservé, sans créer de faux chapitres.'
+      : `Livre importé : ${book.chapters.length} section${book.chapters.length > 1 ? 's' : ''}. Choisis la voix avant de générer de l’audio.`);
 
   }
 
