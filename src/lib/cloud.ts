@@ -54,7 +54,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export type StoredProviderConfig = {
-  provider: 'gemini' | 'deepinfra' | 'aws-polly' | 'piper';
+  provider: 'gemini' | 'deepinfra' | 'aws-polly';
   apiKey?: string;
   apiSecret?: string;
   region?: string;
@@ -73,7 +73,7 @@ export function getStoredProviderConfig(): StoredProviderConfig {
       localStorage.getItem('gemini_api_key') ||
       merged.geminiApiKey;
     return {
-      provider: merged.ttsProvider || 'gemini',
+      provider: merged.ttsProvider === 'deepinfra' || merged.ttsProvider === 'aws-polly' ? merged.ttsProvider : 'gemini',
       apiKey: (merged.apiKey || legacyKey || '').trim() || undefined,
       apiSecret: (merged.apiSecret || '').trim() || undefined,
       region: (merged.awsRegion || 'eu-west-3').trim() || 'eu-west-3',
