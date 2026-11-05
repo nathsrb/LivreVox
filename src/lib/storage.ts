@@ -79,38 +79,30 @@ export async function putBook(book: Book): Promise<void> {
 
 export async function deleteBook(bookId: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([BOOKS, AUDIO, SPEECH_SEGMENTS], 'readwrite');
-  tx.objectStore(BOOKS).delete(bookId);
-  const audioStore = tx.objectStore(AUDIO);
-  const index = audioStore.index('bookId');
-  const cursorRequest = index.openCursor(IDBKeyRange.only(bookId));
-  await new Promise<void>((resolve, reject) => {
-    cursorRequest.onsuccess = () => {
-      const cursor = cursorRequest.result;
-      if (!cursor) {
-        resolve();
-        return;
-      }
-      cursor.delete();
-      cursor.continue();
-    };
-    cursorRequest.onerror = () =>
-      reject(cursorRequest.error ?? new Error('Suppression audio échouée.'));
-  });
-  // Remove temporary audio segments when deleting an entire book.
-  const segmentRequest = tx.objectStore(SPEECH_SEGMENTS)
-    .index('bookId').openCursor(IDBKeyRange.only(bookId));
-  await new Promise<void>((resolve, reject) => {
-    segmentRequest.onsuccess = () => {
-      const cursor = segmentRequest.result;
-      if (!cursor) return resolve();
-      cursor.delete();
-      cursor.continue();
-    };
-    segmentRequest.onerror = () => reject(segmentRequest.error ?? new Error('Nettoyage audio incomplet.'));
-  });
-  await transactionDone(tx);
-  db.close();
+  try {
+    const tx = db.transaction([BOOKS, AUDIO, SPEECH_SEGMENTS], 'readwrite');
+    const finished = transactionDone(tx);
+    tx.objectStore(BOOKS).delete(bookId);
+
+    function removeByBook(storeName: string): Promise<void> {
+      const cursorRequest = tx.objectStore(storeName)
+        .index('bookId').openCursor(IDBKeyRange.only(bookId));
+      return new Promise<void>((resolve, reject) => {
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return resolve();
+          cursor.delete();
+          cursor.continue();
+        };
+        cursorRequest.onerror = () => reject(cursorRequest.error ?? new Error('Suppression audio échouée.'));
+      });
+    }
+    // Queue both cursor operations before the IndexedDB transaction commits.
+    await Promise.all([removeByBook(AUDIO), removeByBook(SPEECH_SEGMENTS)]);
+    await finished;
+  } finally {
+    db.close();
+  }
 }
 
 export async function putAudio(record: AudioRecord): Promise<void> {
@@ -187,6 +179,7 @@ export async function clearSpeechSegments(bookId: string, chapterId: string): Pr
   const db = await openDb();
   try {
     const tx = db.transaction(SPEECH_SEGMENTS, 'readwrite');
+    const finished = transactionDone(tx);
     const store = tx.objectStore(SPEECH_SEGMENTS);
     const cursorReq = store.index('chapterId').openCursor(IDBKeyRange.only(chapterId));
     await new Promise<void>((resolve, reject) => {
@@ -198,7 +191,7 @@ export async function clearSpeechSegments(bookId: string, chapterId: string): Pr
       };
       cursorReq.onerror = () => reject(cursorReq.error ?? new Error('Suppression segments impossible.'));
     });
-    await transactionDone(tx);
+    await finished;
   } finally {
     db.close();
   }
