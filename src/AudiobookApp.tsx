@@ -2256,7 +2256,7 @@ export default function AudiobookApp() {
             if (event.currentTarget === event.target) setSettingsOpen(false);
           }}
         >
-          <div className="lv-card lv-modal">
+          <div className="lv-card lv-modal lv-settings-modal" role="dialog" aria-modal="true" aria-label="Réglages Auralis">
             <div
               style={{
                 display: 'flex',
