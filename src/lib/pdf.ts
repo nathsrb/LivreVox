@@ -149,7 +149,7 @@ export async function renderPdfPageImage(
  * Reject suspicious outlines containing every page/paragraph.
  */
 async function sectionsFromOutline(
-  pdfDocument: Awaited<ReturnType<Awaited<ReturnType<typeof createPdfLoadingTask>>['task']['promise']>>,
+  pdfDocument: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>,
   pageTexts: string[]
 ): Promise<Array<{ title: string; text: string }> | undefined> {
   try {
