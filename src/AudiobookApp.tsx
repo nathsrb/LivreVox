@@ -133,6 +133,9 @@ function loadSettings(): AppSettings {
     const savedRate = localStorage.getItem('auralis_playback_rate');
     if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
     if ((merged.ttsProvider as string) === 'piper') merged.ttsProvider = 'gemini';
+    // Don't persist obsolete local voice identifiers from older app versions.
+    delete (merged as unknown as Record<string, unknown>).voiceId;
+    delete (merged as unknown as Record<string, unknown>).systemVoiceUri;
     return merged;
   } catch {
     return DEFAULT_SETTINGS;
@@ -160,6 +163,10 @@ function renderFormattedSummary(text: string) {
       })}
     </div>
   );
+}
+
+function isCloudGeneratedAudio(record: AudioRecord): boolean {
+  return /^(gemini|deepinfra|aws-polly):/.test(record.voiceId || '');
 }
 
 function audioSourceLabel(voiceId?: string): string {
@@ -344,6 +351,13 @@ export default function AudiobookApp() {
     void (async () => {
       try {
         const list = await getBooks();
+        // One-time cleanup of legacy computer-generated speech across the whole
+        // library. Preserve cloud-generated recordings and PDF text.
+        await Promise.allSettled(list.map(async book => {
+          const oldRecords = await getBookAudio(book.id);
+          const localOnly = oldRecords.filter(record => record.voiceId?.startsWith('piper:'));
+          await Promise.all(localOnly.map(record => deleteAudio(record.bookId, record.chapterId)));
+        }));
         setBooks(list);
         if (list.length) {
           setSelectedId(list[0].id);
@@ -383,7 +397,7 @@ export default function AudiobookApp() {
     void getBookAudio(selectedBook.id).then(async records => {
       const previousLocalAudio = records.filter(record => record.voiceId?.startsWith('piper:'));
       await Promise.all(previousLocalAudio.map(record => deleteAudio(record.bookId, record.chapterId))).catch(() => undefined);
-      const allowed = records.filter(record => record.voiceId && !record.voiceId.startsWith('piper:'));
+      const allowed = records.filter(isCloudGeneratedAudio);
       setAudioMap(Object.fromEntries(allowed.map(record => [record.chapterId, record])));
     });
   }, [selectedBook?.id]);
@@ -1053,7 +1067,6 @@ export default function AudiobookApp() {
     const ready = await ensureVoiceReady();
     if (!ready) return;
     const provider = settings.ttsProvider || 'gemini';
-    const remoteReady = await isRemoteTtsAvailable(false, settings.apiKey);
     const defaultCloudVoice =
       provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore';
     const expectedVoiceId = `${provider}:${settings.cloudVoice || defaultCloudVoice}`;
@@ -1084,7 +1097,7 @@ export default function AudiobookApp() {
     if (!selectedBook) return;
     const records = await getBookAudio(selectedBook.id);
     const map = Object.fromEntries(
-      records.map(record => [record.chapterId, record])
+      records.filter(isCloudGeneratedAudio).map(record => [record.chapterId, record])
     );
     const missing = selectedBook.chapters.filter(chapter => !map[chapter.id]);
     if (missing.length) {
