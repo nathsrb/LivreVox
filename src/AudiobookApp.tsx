@@ -664,35 +664,11 @@ export default function AudiobookApp() {
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
 
-    const remoteReady = await isRemoteTtsAvailable(true, settings.apiKey);
-    const firstChapter = book.chapters[0];
-    if (remoteReady && firstChapter) {
-      setImportProgress({
-        stage: `Génération audio IA · chapitre 1/${book.chapters.length}`,
-        progress: 92,
-      });
-      const firstAudio = await generateOne(book, firstChapter, 'chapter');
-      if (firstAudio) {
-        setImportProgress({ stage: 'Premier chapitre audio prêt', progress: 100 });
-        setTimeout(() => setImportProgress(null), 450);
-        showToast(
-          book.chapters.length > 1
-            ? '▶ Le premier chapitre est prêt. Les suivants se génèrent automatiquement.'
-            : '▶ Ton livre audio est prêt à être écouté.'
-        );
-        if (book.chapters.length > 1) void generateRemainingImportedBook(book, 1);
-        return;
-      }
-    }
+    // Import and narration must be separate. No paid API call occurs on upload.
+    setTab('chapters');
+    setImportProgress(null);
+    showToast(`Livre importé : ${book.chapters.length} section${book.chapters.length > 1 ? 's' : ''}. Choisis une voix, puis génère le chapitre souhaité ou un résumé IA.`);
 
-    setImportProgress({ stage: 'Livre prêt', progress: 100 });
-    setTimeout(() => setImportProgress(null), 350);
-    showToast(
-      remoteReady
-        ? `${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''} importé${book.chapters.length > 1 ? 's' : ''}. La génération audio pourra être relancée.`
-        : 'PDF importé. Configure une clé Gemini valide pour générer automatiquement l’audio IA.',
-      !remoteReady
-    );
   }
 
   async function importCloudFile(file: File): Promise<void> {
@@ -838,22 +814,6 @@ export default function AudiobookApp() {
     showToast(`Chapitre « ${target.title} » supprimé.`);
   }
 
-  async function generateCurrentAndPlay(): Promise<void> {
-    if (!selectedBook || !selectedChapter) return;
-    showToast(`Génération de la voix IA pour « ${selectedChapter.title} »...`);
-    const record = await generateOne(selectedBook, selectedChapter, 'chapter');
-    if (record) {
-      showToast(`Audio IA prêt ! Démarrage de l'écoute.`);
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.currentTime = 0;
-          void audioRef.current.play().catch(() => undefined);
-          setAudioPlaying(true);
-        }
-      }, 300);
-    }
-  }
-
   function togglePlayPause(): void {
     if (playableAudioUrl && audioRef.current) {
       if (audioPlaying) {
@@ -865,7 +825,8 @@ export default function AudiobookApp() {
         });
       }
     } else {
-      void generateCurrentAndPlay();
+      showToast('Pas encore d’audio pour ce chapitre. Choisis une voix avant de lancer la génération.');
+      setTab('export');
     }
   }
 
@@ -1058,7 +1019,7 @@ export default function AudiobookApp() {
             void audioRef.current.play().catch(() => undefined);
             setAudioPlaying(true);
           } else {
-            void generateCurrentAndPlay();
+            showToast('Le chapitre suivant n’a pas encore été généré.');
           }
         }, 280);
       }
@@ -1215,25 +1176,6 @@ export default function AudiobookApp() {
     if (!selectedBook || !selectedChapter) return;
     const record = await generateOne(selectedBook, selectedChapter, 'chapter');
     if (record) showToast('Chapitre audio généré et enregistré localement.');
-  }
-
-  async function generateRemainingImportedBook(
-    book: Book,
-    startIndex: number
-  ): Promise<void> {
-    for (let index = startIndex; index < book.chapters.length; index += 1) {
-      if (cancelGeneration.current) return;
-      const chapter = book.chapters[index];
-      const record = await generateOne(book, chapter, 'book');
-      if (!record) {
-        showToast(
-          `Génération automatique interrompue au chapitre ${index + 1}. Tu peux la reprendre depuis « Générer & exporter ».`,
-          true
-        );
-        return;
-      }
-    }
-    showToast('✓ Livre audio complet généré automatiquement.');
   }
 
   async function generateAll(): Promise<void> {
@@ -1417,7 +1359,7 @@ export default function AudiobookApp() {
           <div className="lv-private-card">
             <LockKeyhole size={15} />
             <span>
-              Mode hybride : petits PDF sur l’appareil, gros livres traités progressivement dans le cloud.
+              Import local de PDF. Les voix et résumés IA sont générés uniquement sur demande.
             </span>
           </div>
         </div>
@@ -1510,13 +1452,13 @@ export default function AudiobookApp() {
             <section className="lv-empty">
               <div className="lv-hero">
                 <div className="lv-badge">
-                  <ShieldCheck size={13} /> Hybride · reprise progressive · streaming cloud
+                  <ShieldCheck size={13} /> PDF → chapitres → voix au choix → audio ou résumé
                 </div>
                 <h1>
                   Transforme ton PDF en <em>livre audio.</em>
                 </h1>
                 <p>
-                  Importe un livre : les petits PDF restent rapides en local et les gros ouvrages passent automatiquement dans le cloud, par blocs, pour garder l’interface fluide. Les premiers chapitres arrivent avant la fin du traitement.
+                  Importe ton livre sans attendre une génération audio. Parcours ses chapitres, choisis une voix Gemini et génère seulement ce que tu veux : un chapitre, tout le livre ou un résumé IA.
                 </p>
                 <div
                   className={`lv-drop ${dragging ? 'dragging' : ''}`}
@@ -1537,7 +1479,7 @@ export default function AudiobookApp() {
                     <FileText size={25} />
                   </div>
                   <strong>Dépose ton PDF ici</strong>
-                  <span>PDF texte, mixte ou scanné · gros fichiers envoyés par blocs reprenables</span>
+                  <span>PDF contenant du texte · l’import ne lance aucun audio</span>
                   <div className="lv-drop-actions">
                     <button
                       className="lv-primary"
@@ -1566,7 +1508,7 @@ export default function AudiobookApp() {
                     <strong>
                       <Zap size={14} /> OCR local
                     </strong>
-                    Les pages scannées sont détectées automatiquement ; le rendu reste léger et la transcription OCR est effectuée dans le cloud.
+                    Le texte sélectionnable est importé. Les PDF uniquement scannés nécessitent encore une transcription OCR.
                   </div>
                   <div className="lv-feature">
                     <strong>
@@ -1596,12 +1538,23 @@ export default function AudiobookApp() {
                     </div>
                   </div>
                 </div>
-                <button
-                  className="lv-secondary"
-                  onClick={() => setDeleteTarget(selectedBook)}
-                >
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button className="lv-secondary" onClick={() => setSettingsOpen(true)}>
+                    <Settings size={14} /> Choisir la voix
+                  </button>
+                  <button className="lv-secondary" onClick={() => setTab('summary')}>
+                    <Brain size={14} /> Résumé IA
+                  </button>
+                  <button className="lv-primary" onClick={() => setTab('export')}>
+                    <WandSparkles size={14} /> Générer l’audio
+                  </button>
+                  <button
+                    className="lv-secondary"
+                    onClick={() => setDeleteTarget(selectedBook)}
+                  >
                   <Trash2 size={14} /> Supprimer
-                </button>
+                  </button>
+                </div>
               </section>
 
               {/* Bannière de reprise automatique */}
@@ -2123,7 +2076,7 @@ export default function AudiobookApp() {
                       <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : 'Moteur neuronal local Piper'}
                     </div>
                     <h2>{isCloudBook ? 'Livre audio progressif dans le cloud' : 'Génère le vrai livre audio'}</h2>
-                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Au premier lancement, le modèle vocal choisi est téléchargé puis conservé dans le stockage privé du navigateur. Le mode local reste disponible pour les petits documents et comme secours.'}</p>
+                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis ta voix Gemini dans les réglages, puis génère ce chapitre ou tout le livre. La génération est toujours volontaire ; les fichiers audio restent enregistrés sur cet appareil.'}</p>
                     <div className="lv-stat-grid">
                       <div className="lv-stat">
                         <strong>
@@ -2143,6 +2096,11 @@ export default function AudiobookApp() {
                       </div>
                     </div>
                     <div className="lv-export-actions">
+                      {!isCloudBook && (
+                        <button className="lv-secondary" style={{ width: 'auto' }} onClick={() => setSettingsOpen(true)}>
+                          <Settings size={15} /> Choisir la voix
+                        </button>
+                      )}
                       {isCloudBook ? (
                         <>
                           <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
