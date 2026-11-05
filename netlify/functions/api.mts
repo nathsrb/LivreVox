@@ -87,7 +87,7 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       text,
-      tts_response_format: 'mp3',
+      tts_response_format: 'wav',
       preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
       speed: 1,
       stream: false,
@@ -99,10 +99,10 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
   if (/^https?:\/\//.test(payload.audio)) {
     const audio = await fetch(payload.audio);
     if (!audio.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
-    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
+    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/wav', extension: 'wav' };
   }
   const clean = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
-  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/mpeg', extension: 'mp3' };
+  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/wav', extension: 'wav' };
 }
 
 async function synthesizePolly(text: string, voice: string, accessKeyId: string, secretAccessKey: string, region: string) {
