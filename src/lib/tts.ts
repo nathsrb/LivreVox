@@ -1,6 +1,7 @@
 import { zipSync } from 'fflate';
 import { chunkForSpeech, sanitizeFileName } from './text';
 import { getStoredProviderConfig } from './cloud';
+import { getSpeechSegments, saveSpeechSegment } from './storage';
 
 export type GeminiVoiceOption = {
   id: string;
@@ -274,8 +275,10 @@ async function synthesizeRemoteChunk(
   }
   if (!response.ok || !payload.audio) {
     if (response.status === 429) {
+      const detail = (payload.error || '').slice(0, 320).replace(/\s+/g, ' ');
       throw new Error(
-        'Limite de génération IA atteinte (HTTP 429). Réessaie plus tard.'
+        'Gemini : erreur 429 (quota ou capacité momentanément insuffisante).' +
+        (detail ? ' Détail : ' + detail : '')
       );
     }
     if (response.status === 401 || response.status === 403) {
@@ -291,6 +294,30 @@ async function synthesizeRemoteChunk(
   return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
 }
 
+function textFingerprint(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return value.length.toString(36) + '-' + (hash >>> 0).toString(36);
+}
+
+async function sleepWithCancel(
+  milliseconds: number,
+  shouldCancel: () => boolean,
+  onTick: (remaining: number) => void
+): Promise<void> {
+  let remaining = milliseconds;
+  while (remaining > 0) {
+    if (shouldCancel()) throw new Error('Génération annulée. Les passages déjà enregistrés sont conservés.');
+    onTick(Math.ceil(remaining / 1000));
+    const duration = Math.min(1000, remaining);
+    await new Promise<void>(resolve => setTimeout(resolve, duration));
+    remaining -= duration;
+  }
+}
+
 /**
  * Cloud-only audiobook rendering: the app never invokes a local TTS engine.
  */
@@ -299,7 +326,8 @@ export async function synthesizeChapter(
   onProgress: (value: number, label: string) => void,
   shouldCancel: () => boolean,
   customApiKey?: string,
-  cloudVoice?: string
+  cloudVoice?: string,
+  cacheContext?: { bookId: string; chapterId: string }
 ): Promise<{ blob: Blob; duration: number; engineVoiceId: string }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
@@ -314,20 +342,76 @@ export async function synthesizeChapter(
     : provider === 'aws-polly'
       ? 'Amazon Polly'
       : 'Gemini';
-  const remoteChunks = chunkForSpeech(text, 500);
+  // Each request narrates about 200 words instead of ~80, reducing API calls
+  // and quota pressure without using a long, potentially unstable TTS output.
+  const remoteChunks = chunkForSpeech(text, 1200);
+  const engineVoiceId = `${provider}:${cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
+  const storedSegments = cacheContext
+    ? await getSpeechSegments(cacheContext.bookId, cacheContext.chapterId)
+    : [];
+  const availableSegments = new Map(
+    storedSegments.filter(segment => segment.voiceId === engineVoiceId)
+      .map(segment => [segment.index, segment])
+  );
   const remoteBlobs: Blob[] = [];
+  let reused = 0;
   for (let index = 0; index < remoteChunks.length; index += 1) {
-    if (shouldCancel()) throw new Error('Génération annulée.');
-    onProgress(
-      Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82),
-      `${providerLabel} · segment ${index + 1}/${remoteChunks.length}`
-    );
-    remoteBlobs.push(
-      await synthesizeRemoteChunk(remoteChunks[index], activeKey, cloudVoice)
-    );
+    if (shouldCancel()) throw new Error('Génération annulée. Les passages déjà générés sont conservés.');
+    const chunk = remoteChunks[index];
+    const signature = textFingerprint(chunk);
+    const cached = availableSegments.get(index);
+    const progress = Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82);
+
+    if (cached?.textHash === signature && cached.blob?.size > 0) {
+      remoteBlobs.push(cached.blob);
+      reused++;
+      onProgress(progress, `${providerLabel} · reprise du segment ${index + 1}/${remoteChunks.length} (${reused} sauvegardés)`);
+      continue;
+    }
+
+    let segmentAudio: Blob | null = null;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      if (shouldCancel()) throw new Error('Génération annulée. Les passages déjà générés sont conservés.');
+      onProgress(progress, `${providerLabel} · génération ${index + 1}/${remoteChunks.length}`);
+      try {
+        segmentAudio = await synthesizeRemoteChunk(chunk, activeKey, cloudVoice);
+        break;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const quotaError = /429|RESOURCE_EXHAUSTED|quota/i.test(reason);
+        const permanentQuota = /(?:requests? per day|per.?day|daily|quota[^\n]{0,45}0\b)/i.test(reason);
+        if (!quotaError || permanentQuota || attempt === 2) {
+          if (quotaError) {
+            throw new Error(
+              `Gemini a refusé le passage ${index + 1}/${remoteChunks.length} (429). ` +
+              `Les ${remoteBlobs.length} passages déjà réussis sont conservés dans le navigateur. ` +
+              'Relance « Générer ce chapitre » pour les reprendre, sans tout recommencer. ' +
+              reason.slice(0, 230)
+            );
+          }
+          throw error;
+        }
+        const waitMs = attempt === 0 ? 12000 : 30000;
+        await sleepWithCancel(waitMs, shouldCancel, seconds => {
+          onProgress(progress, `Quota ${providerLabel} (429) · nouvelle tentative dans ${seconds}s · passages conservés`);
+        });
+      }
+    }
+    if (!segmentAudio) throw new Error('Aucun audio reçu pour ce passage.');
+    if (cacheContext) {
+      await saveSpeechSegment({
+        id: `${cacheContext.bookId}:${cacheContext.chapterId}:${engineVoiceId}:${index}`,
+        bookId: cacheContext.bookId,
+        chapterId: cacheContext.chapterId,
+        voiceId: engineVoiceId,
+        index,
+        textHash: signature,
+        blob: segmentAudio,
+      });
+    }
+    remoteBlobs.push(segmentAudio);
   }
   onProgress(96, `Assemblage du chapitre audio · ${providerLabel}`);
-  const engineVoiceId = `${provider}:${cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
   if (remoteBlobs.every(blob => blob.type.includes('wav'))) {
     const merged = await mergeWavBlobs(remoteBlobs);
     onProgress(100, `Audio ${providerLabel} prêt`);
