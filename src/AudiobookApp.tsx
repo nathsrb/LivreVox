@@ -125,16 +125,9 @@ function loadSettings(): AppSettings {
   try {
     const rawA = localStorage.getItem('auralis-settings');
     const rawL = localStorage.getItem('livrevox-settings');
-    const directKey =
-      localStorage.getItem('auralis_gemini_api_key') ||
-      localStorage.getItem('gemini_api_key');
     const parsedA = rawA ? (JSON.parse(rawA) as Partial<AppSettings>) : {};
     const parsedL = rawL ? (JSON.parse(rawL) as Partial<AppSettings>) : {};
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsedL, ...parsedA };
-    if (false && directKey && directKey.trim() && !merged.apiKey) {
-      merged.apiKey = directKey.trim();
-      merged.geminiApiKey = directKey.trim();
-    }
     const savedRate = localStorage.getItem('auralis_playback_rate');
     if (savedRate && !isNaN(Number(savedRate))) merged.rate = Number(savedRate);
     // Kokoro/DeepInfra is the only speech-generation provider in this preview.
