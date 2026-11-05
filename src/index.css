@@ -775,6 +775,40 @@ button:disabled {
   width: min(520px, 100%);
   padding: 21px;
 }
+/* Keep Auralis settings accessible even on short laptop screens. */
+.lv-settings-modal {
+  max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #8873ed #162034;
+}
+.lv-settings-modal::-webkit-scrollbar {
+  width: 9px;
+}
+.lv-settings-modal::-webkit-scrollbar-track {
+  background: #162034;
+  border-radius: 12px;
+}
+.lv-settings-modal::-webkit-scrollbar-thumb {
+  background: #8873ed;
+  border-radius: 12px;
+  border: 2px solid #162034;
+}
+.lv-settings-modal::-webkit-scrollbar-thumb:hover {
+  background: #aa9aff;
+}
+@media (max-width: 560px) {
+  .lv-settings-modal {
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    padding: 16px;
+  }
+}
 .lv-modal h2 {
   margin: 0 0 7px;
   font-size: 20px;
