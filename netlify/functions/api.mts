@@ -163,7 +163,7 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
       method: 'POST',
       headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: env('DEEPINFRA_TEXT_MODEL') || 'meta-llama/Llama-3.3-70B-Instruct',
+        model: env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
       }),
