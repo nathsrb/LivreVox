@@ -2280,26 +2280,58 @@ export default function AudiobookApp() {
                   ? 'Voix Gemini'
                   : 'Voix Cloud'}
               </label>
-              <select
-                id="cloud-voice"
-                className="lv-select"
-                value={settings.cloudVoice || 'Kore'}
-                onChange={event =>
-                  setSettings(current => ({
-                    ...current,
-                    cloudVoice: event.target.value,
-                  }))
-                }
-              >
-                {((settings.ttsProvider || 'gemini') === 'gemini'
-                  ? geminiVoiceOptions
-                  : CLOUD_VOICES
-                ).map(voice => (
-                  <option key={voice.id} value={voice.id}>
-                    {voice.label}
-                  </option>
-                ))}
-              </select>
+              <details style={{ position: 'relative', width: '100%' }}>
+                <summary
+                  className="lv-select"
+                  aria-label="Choisir une voix Gemini"
+                  style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+                >
+                  <span>{((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : CLOUD_VOICES)
+                    .find(voice => voice.id === (settings.cloudVoice || 'Kore'))?.label || settings.cloudVoice || 'Kore'}</span>
+                  <ChevronRight size={16} style={{ transform: 'rotate(90deg)', flexShrink: 0 }} />
+                </summary>
+                <div
+                  role="listbox"
+                  aria-label="Voix disponibles"
+                  style={{
+                    maxHeight: 'min(270px, 45vh)',
+                    overflowY: 'auto',
+                    overscrollBehavior: 'contain',
+                    background: '#182433',
+                    border: '1px solid rgba(167, 139, 250, 0.45)',
+                    borderRadius: 12,
+                    padding: 6,
+                    marginTop: 6,
+                    boxShadow: '0 12px 28px rgba(0,0,0,.35)',
+                  }}
+                >
+                  {((settings.ttsProvider || 'gemini') === 'gemini' ? geminiVoiceOptions : CLOUD_VOICES).map(voice => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={(settings.cloudVoice || 'Kore') === voice.id}
+                      key={voice.id}
+                      onClick={event => {
+                        setSettings(current => ({ ...current, cloudVoice: voice.id }));
+                        event.currentTarget.closest('details')?.removeAttribute('open');
+                      }}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '10px 12px',
+                        borderRadius: 8,
+                        border: 'none',
+                        color: '#f8fafc',
+                        cursor: 'pointer',
+                        background: (settings.cloudVoice || 'Kore') === voice.id ? '#53407a' : 'transparent',
+                      }}
+                    >
+                      {voice.label}
+                    </button>
+                  ))}
+                </div>
+              </details>
 
               {(settings.ttsProvider || 'gemini') === 'gemini' && (
                 <>
