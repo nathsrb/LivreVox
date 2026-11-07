@@ -60,10 +60,13 @@ import {
 } from './lib/cloud';
 import {
   clearSpeechSegments,
+  clearSummarySegments,
   deleteAudio,
   deleteBook,
   getBookAudio,
   getBooks,
+  getSummarySegments,
+  saveSummarySegment,
   putAudio,
   putBook,
 } from './lib/storage';
@@ -244,6 +247,7 @@ export default function AudiobookApp() {
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [deleteChapterTarget, setDeleteChapterTarget] = useState<Chapter | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryProgress, setSummaryProgress] = useState('');
   const [keyTestStatus, setKeyTestStatus] = useState<'idle' | 'testing' | 'valid' | 'invalid'>('idle');
   const [keyTestError, setKeyTestError] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<{ fileName: string; incorrect: boolean } | null>(null);
@@ -826,24 +830,25 @@ export default function AudiobookApp() {
   }
 
   async function generateChapterSummary(chapter: Chapter): Promise<void> {
-    if (!selectedBook) return;
+    if (!selectedBook || summaryLoading) return;
+    const book = selectedBook;
     setSummaryLoading(true);
+    setSummaryProgress('Lecture du chapitre…');
     try {
-      const chapterIndex = selectedBook.chapters.findIndex(c => c.id === chapter.id);
-      const prevContext = selectedBook.chapters
-        .slice(0, chapterIndex)
-        .map((c, i) => `Chapitre ${i + 1} : ${c.title}`)
-        .join(', ');
+      const indexInBook = book.chapters.findIndex(item => item.id === chapter.id);
+      const context = book.chapters.slice(0, indexInBook)
+        .map((item, index) => 'Chapitre ' + (index + 1) + ' : ' + item.title).join(', ');
 
-      // Retry temporary service errors; if a long segment stays slow, break it
-      // into smaller passages without dropping any of the chapter's content.
-      const requestSummary = async (text: string, parts?: string[]): Promise<string> => {
-        const payload = JSON.stringify({
+      const requestSummary = async (
+        text: string, parts?: string[], mode: 'notes' | 'final' = 'notes'
+      ): Promise<string> => {
+        const body = JSON.stringify({
           chapterText: text,
           summaryParts: parts,
+          summaryMode: mode,
           chapterTitle: chapter.title,
-          bookTitle: selectedBook.title,
-          previousChaptersContext: prevContext,
+          bookTitle: book.title,
+          previousChaptersContext: context,
           provider: settings.ttsProvider || 'deepinfra',
         });
         let lastStatus = 0;
@@ -856,79 +861,139 @@ export default function AudiobookApp() {
                 ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
                 'x-tts-provider': settings.ttsProvider || 'deepinfra',
               },
-              body: payload,
+              body,
             });
             lastStatus = res.status;
             if (res.ok) {
               const data = await res.json();
               if (typeof data.summary === 'string' && data.summary.trim()) return data.summary.trim();
-              throw new Error('Le service a renvoyé une fiche vide.');
+              throw new Error('La fiche reçue est vide.');
             }
             if (res.status !== 429 && res.status < 500) {
-              throw new Error('Cette fiche ne peut pas être préparée pour le moment.');
+              throw new Error('Ce chapitre ne peut pas être analysé pour le moment.');
             }
-            console.warn('Auralis fiche: nouvelle tentative après réponse', res.status);
+            console.warn('Auralis chapter summary status:', res.status);
           } catch (error) {
-            if (error instanceof Error && /fiche ne peut pas|fiche vide/.test(error.message)) throw error;
-            console.warn('Auralis fiche: erreur temporaire de connexion', error);
+            if (error instanceof Error && /fiche reçue est vide|ne peut pas être analysé/.test(error.message)) throw error;
+            console.warn('Auralis summary temporary error:', error);
           }
           if (attempt === 0) await new Promise<void>(resolve => setTimeout(resolve, 1800));
         }
-        if (text.length > 6500 && lastStatus !== 429 && (!parts || !parts.length)) {
-          const midpoint = Math.floor(text.length / 2);
-          let cut = text.lastIndexOf('\n\n', midpoint);
-          if (cut < text.length / 4) cut = text.lastIndexOf(' ', midpoint);
-          if (cut < text.length / 4) cut = midpoint;
-          const left = await requestSummary(text.slice(0, cut).trim());
-          const right = await requestSummary(text.slice(cut).trim());
-          return requestSummary('', [left, right]);
+        if (text.length > 6000 && lastStatus !== 429 && (!parts || parts.length === 0)) {
+          const middle = Math.floor(text.length / 2);
+          let cut = text.lastIndexOf('\n\n', middle);
+          if (cut < text.length / 4) cut = text.lastIndexOf(' ', middle);
+          if (cut < text.length / 4) cut = middle;
+          const first = await requestSummary(text.slice(0, cut).trim(), undefined, 'notes');
+          const second = await requestSummary(text.slice(cut).trim(), undefined, 'notes');
+          return requestSummary('', [first, second], mode);
         }
         throw new Error(lastStatus === 429
-          ? 'Le service est temporairement très sollicité. Tes autres fiches restent enregistrées.'
-          : 'La préparation de cette fiche a pris trop de temps. Réessaie dans un instant.');
+          ? 'La lecture est très sollicitée en ce moment. Tes progrès ont été conservés.'
+          : 'La fiche a pris trop de temps. Tes passages déjà étudiés sont sauvegardés.');
       };
 
-      // Cover each part of a long chapter instead of silently ignoring the end.
+      const source = chapter.text.trim();
+      if (!source) throw new Error('Ce chapitre ne contient pas de texte à analyser.');
       const segments: string[] = [];
-      const chapterText = chapter.text.trim();
-      for (let offset = 0; offset < chapterText.length;) {
-        let end = Math.min(offset + 11000, chapterText.length);
-        if (end < chapterText.length) {
-          const paragraphEnd = chapterText.lastIndexOf('\n\n', end);
-          if (paragraphEnd > offset + 6500) end = paragraphEnd + 2;
+      for (let offset = 0; offset < source.length;) {
+        let boundary = Math.min(offset + 9000, source.length);
+        if (boundary < source.length) {
+          const paragraph = source.lastIndexOf('\n\n', boundary);
+          if (paragraph > offset + 5500) boundary = paragraph + 2;
         }
-        segments.push(chapterText.slice(offset, end));
-        offset = end;
+        segments.push(source.slice(offset, boundary));
+        offset = boundary;
       }
-      if (segments.length > 24) throw new Error('Ce chapitre est trop long pour être analysé en une seule fiche.');
-      let notes: string[] = [];
-      for (const segment of segments) {
-        notes.push(await requestSummary(segment));
-      }
-      // Merge smaller groups to avoid a single oversized consolidation request.
-      while (notes.length > 1) {
-        const combined: string[] = [];
-        for (let i = 0; i < notes.length; i += 4) {
-          combined.push(await requestSummary('', notes.slice(i, i + 4)));
+      // Hash both the text and its position so cached notes cannot be mistaken
+      // for another edition of the same book.
+      const signature = (input: string): string => {
+        let hash = 2166136261;
+        for (let i = 0; i < input.length; i++) {
+          hash ^= input.charCodeAt(i);
+          hash = Math.imul(hash, 16777619);
         }
-        notes = combined;
-      }
-      const summaryText = notes[0];
+        return input.length.toString(36) + '-' + (hash >>> 0).toString(36);
+      };
+      const saved = await getSummarySegments(book.id, chapter.id);
+      const cached = new Map(saved.map(item => [item.id, item]));
+      const getOrCreate = async (
+        stage: number, position: number, keyText: string, create: () => Promise<string>
+      ): Promise<string> => {
+        const id = book.id + ':' + chapter.id + ':' + stage + ':' + position;
+        const textHash = signature(keyText);
+        const previous = cached.get(id);
+        if (previous?.textHash === textHash && previous.text.trim()) return previous.text;
+        const result = await create();
+        const record = {
+          id, bookId: book.id, chapterId: chapter.id,
+          stage, index: position, textHash, text: result,
+        };
+        await saveSummarySegment(record);
+        cached.set(id, record);
+        return result;
+      };
 
+      let summaryText: string;
+      let isProvisional = false;
+      if (segments.length === 1) {
+        setSummaryProgress('Rédaction de la fiche…');
+        summaryText = await getOrCreate(99, 0, source, () => requestSummary(source, undefined, 'final'));
+      } else {
+        let notes: string[] = [];
+        for (let index = 0; index < segments.length; index++) {
+          setSummaryProgress('Analyse du passage ' + (index + 1) + '/' + segments.length +
+            ' · les étapes terminées sont conservées');
+          notes.push(await getOrCreate(0, index, segments[index],
+            () => requestSummary(segments[index], undefined, 'notes')));
+        }
+        let stage = 1;
+        while (notes.length > 2) {
+          const combined: string[] = [];
+          for (let index = 0; index < notes.length; index += 2) {
+            const group = notes.slice(index, index + 2);
+            if (group.length === 1) {
+              combined.push(group[0]);
+              continue;
+            }
+            setSummaryProgress('Regroupement de la fiche · étape ' + stage);
+            combined.push(await getOrCreate(stage, Math.floor(index / 2), group.join('\n\n'),
+              () => requestSummary('', group, 'notes')));
+          }
+          notes = combined;
+          stage++;
+        }
+        setSummaryProgress('Finalisation de la fiche…');
+        try {
+          summaryText = await getOrCreate(99, 0, notes.join('\n\n'),
+            () => requestSummary('', notes, 'final'));
+        } catch {
+          // Even when the final merge times out, preserve a useful, honestly
+          // labeled overview rather than discard all successfully read passages.
+          isProvisional = true;
+          summaryText = '### Fiche provisoire\n' +
+            'Les passages du chapitre ont été analysés, mais leur mise en forme finale n’a pas abouti. ' +
+            'Voici les points relevés dans l’ordre. Relance « Actualiser la fiche » pour réessayer.\n\n' +
+            notes.join('\n\n');
+        }
+      }
       const updatedBook: Book = {
-        ...selectedBook,
-        updatedAt: Date.now(),
-        chapters: selectedBook.chapters.map(c =>
-          c.id === chapter.id ? { ...c, summary: summaryText } : c
-        ),
+        ...book, updatedAt: Date.now(),
+        chapters: book.chapters.map(item => item.id === chapter.id
+          ? { ...item, summary: summaryText, summaryProvisional: isProvisional }
+          : item),
       };
       await putBook(updatedBook);
-      setBooks(current => current.map(b => (b.id === updatedBook.id ? updatedBook : b)));
-      showToast('✨ Fiche de lecture prête !');
-    } catch (err: any) {
-      showToast(err?.message || 'Impossible de préparer cette fiche', true);
+      setBooks(current => current.map(item => item.id === updatedBook.id ? updatedBook : item));
+      if (!isProvisional) await clearSummarySegments(book.id, chapter.id).catch(() => undefined);
+      showToast(isProvisional
+        ? 'Une fiche provisoire est enregistrée. Tu peux la compléter plus tard.'
+        : 'Fiche de lecture prête !');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Impossible de préparer cette fiche.', true);
     } finally {
       setSummaryLoading(false);
+      setSummaryProgress('');
     }
   }
 
@@ -1959,6 +2024,9 @@ export default function AudiobookApp() {
                       </p>
                     </div>
                     <div className="lv-summary-actions">
+                      {selectedChapter.summaryProvisional && (
+                        <p className="lv-summary-note">Fiche provisoire : certains passages restent à regrouper. Tu peux relancer « Actualiser la fiche ».</p>
+                      )}
                       {selectedChapter.summary && (
                         <button className="lv-secondary" title="Copier la fiche" onClick={() => void copyChapterSummary(selectedChapter.summary!)}>
                           <FileText size={14} /> Copier la fiche
@@ -1982,7 +2050,7 @@ export default function AudiobookApp() {
                       >
                         {summaryLoading ? (
                           <>
-                            <RefreshCw size={14} className="animate-spin" /> Préparation de la fiche...
+                            <RefreshCw size={14} className="animate-spin" /> {summaryProgress || 'Préparation de la fiche…'}
                           </>
                         ) : selectedChapter.summary ? (
                           <>
