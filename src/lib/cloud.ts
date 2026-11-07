@@ -62,24 +62,21 @@ export type StoredProviderConfig = {
 
 export function getStoredProviderConfig(): StoredProviderConfig {
   try {
-    if (typeof localStorage === 'undefined') return { provider: 'gemini' };
+    if (typeof localStorage === 'undefined') return { provider: 'deepinfra' };
     const read = (key: string) => {
       const raw = localStorage.getItem(key);
       return raw ? JSON.parse(raw) : {};
     };
     const merged = { ...read('livrevox-settings'), ...read('auralis-settings') };
-    const legacyKey =
-      localStorage.getItem('auralis_gemini_api_key') ||
-      localStorage.getItem('gemini_api_key') ||
-      merged.geminiApiKey;
     return {
-      provider: merged.ttsProvider || 'gemini',
-      apiKey: (merged.apiKey || legacyKey || '').trim() || undefined,
-      apiSecret: (merged.apiSecret || '').trim() || undefined,
-      region: (merged.awsRegion || 'eu-west-3').trim() || 'eu-west-3',
+      provider: 'deepinfra',
+      // Never fall back to a Google API key for Kokoro.
+      apiKey: merged.ttsProvider === 'deepinfra' ? (merged.apiKey || '').trim() || undefined : undefined,
+      apiSecret: undefined,
+      region: 'eu-west-3',
     };
   } catch {
-    return { provider: 'gemini' };
+    return { provider: 'deepinfra' };
   }
 }
 

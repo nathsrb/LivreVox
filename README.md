@@ -4,16 +4,14 @@ LivreVox transforme un PDF en livre audio directement écoutable dans l’applic
 
 ## Flux principal
 
-Le parcours prioritaire est volontairement simple :
+1. L’utilisateur importe un PDF. Aucun audio n'est créé automatiquement.
+2. PDF.js extrait le texte et Auralis repère les chapitres.
+3. L’utilisateur choisit son fournisseur et sa voix IA dans les paramètres.
+4. L’utilisateur génère un chapitre ou le livre entier à sa demande.
+5. L’application lit les fichiers obtenus depuis l’API distante et permet l’export.
 
-1. l’utilisateur importe un PDF ;
-2. PDF.js extrait le texte localement ;
-3. LivreVox détecte les chapitres ;
-4. si Gemini est configuré, le premier chapitre audio est généré automatiquement ;
-5. l’écoute peut commencer immédiatement ;
-6. les chapitres suivants sont générés progressivement en arrière-plan.
-
-Si aucun moteur distant n’est disponible, Piper reste disponible comme secours local.
+Il n’existe aucun moteur de synthèse vocale local ou voix système dans Auralis.
+Si l’API refuse une génération, l’application affiche l’erreur au lieu de substituer une autre voix.
 
 ## Gemini TTS et choix des voix
 
@@ -35,13 +33,12 @@ Le routage historique reste disponible :
 - **Google Gemini** — fournisseur par défaut et recommandé ;
 - **DeepInfra + Kokoro** — alternative TTS ;
 - **Amazon Polly** — fournisseur AWS ;
-- **Piper local** — secours hors ligne.
 
 ## Architecture
 
 - `src/AudiobookApp.tsx` : interface, import PDF, génération progressive, lecteur et réglages de voix ;
 - `src/lib/pdf.ts` : extraction PDF / OCR ;
-- `src/lib/tts.ts` : TTS, catalogue Gemini et fallback Piper ;
+- `src/lib/tts.ts` : synthèse vocale distante, catalogue Gemini et assemblage des fichiers audio ;
 - `server.ts` : API Node pour Gemini, DeepInfra et Polly ;
 - `src/lib/storage.ts` : bibliothèque et fichiers audio locaux.
 
@@ -106,6 +103,6 @@ L'application web Vite/React est publiée depuis `dist/`. Les clés IA restent s
 - Netlify Functions a une durée maximale de requête. Les textes sont segmentés pour la génération audio et les réponses binaires évitent la limite des réponses JSON mises en mémoire.
 - **Stockage local** : livres et audios restent dans l'IndexedDB du navigateur, propre au domaine. Les données déjà stockées sur l'URL AppDeploy ne migrent pas automatiquement vers Netlify : réimporter les PDF pour les retrouver sur le nouveau domaine.
 - **Mode Cloud historique** : les traitements AppDeploy avec stockage cloud et les routes d'export GitHub côté serveur ne sont pas migrés. Cette version est *local-first* (PDF traité côté navigateur ; synthèse et résumés IA côté serveur Netlify).
-- La voix Piper locale peut être bloquée si l'hébergement tiers de ses modèles réclame une vérification ; avec une clé IA Netlify valide, la génération Gemini/DeepInfra/Polly est prioritaire.
+- Le navigateur ne génère pas de voix. La synthèse utilise uniquement Gemini, DeepInfra ou Polly. Les audios historiques explicitement identifiés comme Piper sont retirés de la bibliothèque lors de son chargement.
 
 Pour le développement Netlify complet : `npx netlify dev` (la commande `npm run dev` continue d'utiliser l'ancien serveur Express de développement).

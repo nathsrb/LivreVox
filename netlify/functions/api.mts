@@ -7,7 +7,10 @@
 import { Buffer } from 'node:buffer';
 import { createHash, createHmac } from 'node:crypto';
 
-const env = (key: string): string => process.env[key]?.trim() || '';
+const env = (key: string): string => {
+  const platformValue = (globalThis as any).Netlify?.env?.get?.(key);
+  return String(platformValue || process.env[key] || '').trim();
+};
 const respond = (body: unknown, status = 200): Response =>
   Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 const header = (request: Request, key: string) => request.headers.get(key)?.trim() || '';
@@ -21,9 +24,10 @@ type ProviderCredentials = {
   region?: string;
 };
 
-function normalizeProvider(value?: string): ProviderName {
-  if (value === 'deepinfra' || value === 'aws-polly') return value;
-  return 'gemini';
+function normalizeProvider(_value?: string): ProviderName {
+  // Preview-only build: Kokoro via DeepInfra is the sole permitted generation provider.
+  // This also rejects stale Gemini preferences and any client-supplied override.
+  return 'deepinfra';
 }
 
 function sha256Hex(value: string): string {
@@ -58,8 +62,12 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
   });
   if (!response.ok) throw new Error('Gemini TTS (' + response.status + '): ' + (await response.text()).slice(0,700));
   const data = await response.json() as any;
+  // Interactions API returns the audio directly as output_audio.data.
+  // Older shapes may still expose it through a step.
   const block = modern
-    ? (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : []).filter((c: any) => c?.type === 'audio' && c?.data).at(-1)
+    ? (data?.output_audio || data?.outputAudio ||
+        (data?.steps || []).flatMap((s: any) => s?.type === 'model_output' ? (s?.content || []) : [])
+          .filter((c: any) => c?.type === 'audio' && c?.data).at(-1))
     : data?.candidates?.[0]?.content?.parts?.find((p: any) => p?.inlineData?.data)?.inlineData;
   if (!block?.data) throw new Error('Le fournisseur Gemini n’a renvoyé aucun audio.');
   let buffer = Buffer.from(block.data, 'base64');
@@ -77,28 +85,80 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
   return { buffer, mimeType: 'audio/wav', extension: 'wav' };
 }
 
-async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) {
-  const response = await fetch('https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      tts_response_format: 'mp3',
-      preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
-      speed: 1,
-      stream: false,
-    }),
-  });
-  if (!response.ok) throw new Error(`DeepInfra Kokoro ${response.status}: ${await response.text()}`);
-  const payload = await response.json() as { audio?: string };
-  if (!payload.audio) throw new Error('DeepInfra n’a renvoyé aucun audio.');
-  if (/^https?:\/\//.test(payload.audio)) {
-    const audio = await fetch(payload.audio);
-    if (!audio.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
-    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
+type DeepInfraSpeechRoute = 'openai' | 'inference';
+
+async function synthesizeDeepInfra(
+  text: string, voice: string, apiKey: string, route: DeepInfraSpeechRoute = 'openai'
+) {
+  // Kokoro has two documented API surfaces. Use the OpenAI-compatible binary
+  // speech endpoint first, with the inference endpoint as an independent fallback.
+  // Never make both calls in one Netlify invocation: a queued first call can
+  // consume the whole function deadline.
+  const selectedVoice = voice && voice !== 'Kore' ? voice : 'ff_siwis';
+  const isOpenAI = route === 'openai';
+  const endpoint = isOpenAI
+    ? 'https://api.deepinfra.com/v1/openai/audio/speech'
+    : 'https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M';
+  const payload = isOpenAI
+    ? {
+        model: 'hexgrad/Kokoro-82M',
+        input: text,
+        voice: selectedVoice,
+        response_format: 'wav',
+        speed: 1,
+        service_tier: 'priority',
+      }
+    : {
+        text,
+        tts_response_format: 'wav',
+        preset_voice: [selectedVoice],
+        speed: 1,
+        stream: false,
+        service_tier: 'priority',
+      };
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(22000),
+    });
+  } catch (error) {
+    console.warn('[auralis-tts] DeepInfra connection failure', route,
+      error instanceof Error ? error.name : 'network');
+    throw error;
   }
-  const clean = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
-  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/mpeg', extension: 'mp3' };
+  if (!response.ok) {
+    const status = response.status;
+    const detail = (await response.text()).slice(0, 240);
+    console.warn('[auralis-tts] DeepInfra returned', status, route);
+    throw new Error('DeepInfra Kokoro (' + route + ') HTTP ' + status +
+      (status === 429 ? ' : file d’attente saturée.' : ': ' + detail));
+  }
+  if (isOpenAI) {
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.startsWith('audio/') && !contentType.includes('octet-stream'))
+      throw new Error('DeepInfra OpenAI a renvoyé un format audio invalide.');
+    const audio = Buffer.from(await response.arrayBuffer());
+    if (audio.length < 44 || audio.subarray(0, 4).toString() !== 'RIFF')
+      throw new Error('Le fichier WAV reçu de Kokoro est incomplet.');
+    return { buffer: audio, mimeType: 'audio/wav', extension: 'wav' };
+  }
+  const result = await response.json() as { audio?: string };
+  if (!result.audio) throw new Error('DeepInfra Kokoro n’a renvoyé aucun audio.');
+  let audio: Buffer;
+  if (/^https?:\/\//.test(result.audio)) {
+    const r = await fetch(result.audio, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('Impossible de récupérer le WAV de Kokoro.');
+    audio = Buffer.from(await r.arrayBuffer());
+  } else {
+    const encoded = result.audio.includes(',') ? result.audio.slice(result.audio.indexOf(',') + 1) : result.audio;
+    audio = Buffer.from(encoded, 'base64');
+  }
+  if (audio.length < 44 || audio.subarray(0, 4).toString() !== 'RIFF')
+    throw new Error('Kokoro a renvoyé un WAV incomplet.');
+  return { buffer: audio, mimeType: 'audio/wav', extension: 'wav' };
 }
 
 async function synthesizePolly(text: string, voice: string, accessKeyId: string, secretAccessKey: string, region: string) {
@@ -139,9 +199,11 @@ async function synthesizePolly(text: string, voice: string, accessKeyId: string,
   return { buffer: Buffer.from(await response.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
 }
 
-async function synthesizeProviderSpeech(text: string, voice: string, credentials: ProviderCredentials) {
+async function synthesizeProviderSpeech(
+  text: string, voice: string, credentials: ProviderCredentials, route: DeepInfraSpeechRoute = 'openai'
+) {
   if (!credentials.apiKey) throw new Error('Clé API manquante.');
-  if (credentials.provider === 'deepinfra') return synthesizeDeepInfra(text, voice, credentials.apiKey);
+  if (credentials.provider === 'deepinfra') return synthesizeDeepInfra(text, voice, credentials.apiKey, route);
   if (credentials.provider === 'aws-polly') {
     if (!credentials.apiSecret) throw new Error('AWS Secret Access Key manquante.');
     return synthesizePolly(text, voice, credentials.apiKey, credentials.apiSecret, credentials.region || 'eu-west-3');
@@ -149,23 +211,73 @@ async function synthesizeProviderSpeech(text: string, voice: string, credentials
   return synthesizeGemini(text, voice, credentials.apiKey);
 }
 
-async function generateTextWithProvider(prompt: string, credentials: ProviderCredentials): Promise<string> {
+async function generateTextWithProvider(prompt: string, credentials: ProviderCredentials, tokenLimit = 1600): Promise<string> {
   if (credentials.provider === 'aws-polly') {
     throw new Error('Amazon Polly est un service vocal uniquement. Utilise Gemini ou DeepInfra pour les résumés IA.');
   }
   if (credentials.provider === 'deepinfra') {
-    const response = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: env('DEEPINFRA_TEXT_MODEL') || 'meta-llama/Llama-3.3-70B-Instruct',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
-      }),
-    });
-    if (!response.ok) throw new Error(`DeepInfra texte ${response.status}: ${await response.text()}`);
-    const payload = await response.json() as any;
-    return payload?.choices?.[0]?.message?.content || '';
+    const primaryModel = env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017';
+    // Keep DeepSeek V4.1, but allow a second endpoint of the same model family
+    // when the primary responds with a transient 5xx or exhausted generation.
+    const alternateModel = primaryModel; // Retry the verified deployed model, not an unverified model alias.
+    const deadline = Date.now() + 23500;
+    let lastError = 'Le service de lecture est temporairement indisponible.';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = deadline - Date.now();
+      if (remaining < 2500) break;
+      const model = attempt === 0 ? primaryModel : alternateModel;
+      try {
+        const response = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.2,
+            reasoning_effort: 'none',
+            max_tokens: tokenLimit,
+            stream: false,
+          }),
+          // Always finish before the Netlify ~30-second gateway limit.
+          signal: AbortSignal.timeout(Math.min(19500, remaining - 700)),
+        });
+        if (!response.ok) {
+          // Do not expose provider details, API keys, or prompt text in user errors.
+          const upstreamStatus = response.status;
+          console.warn('[auralis-summary] upstream response', upstreamStatus, model);
+          lastError = upstreamStatus === 429
+            ? 'La création de la fiche est temporairement limitée par le service.'
+            : 'Le service de lecture est momentanément indisponible.';
+          if (upstreamStatus === 429 || (upstreamStatus >= 500 && upstreamStatus < 600)) continue;
+          throw new Error('La préparation de la fiche a été refusée (' + upstreamStatus + ').');
+        }
+        const payload = await response.json() as any;
+        const choice = payload?.choices?.[0];
+        const content = typeof choice?.message?.content === 'string' ? choice.message.content.trim() : '';
+        const finish = String(choice?.finish_reason || '');
+        if (content && finish === 'stop') return content;
+        if (finish === 'length' || finish === 'max_tokens') {
+          console.warn('[auralis-summary] output limit reached', model, 'tokens', tokenLimit);
+          lastError = 'La fiche demande davantage de détails. Une nouvelle tentative est nécessaire.';
+          // The second attempt uses a larger output budget.
+          continue;
+        }
+        if (!content) {
+          console.warn('[auralis-summary] empty response', model, finish);
+          lastError = 'Le service a renvoyé une fiche vide.';
+          continue;
+        }
+        if (finish === 'content_filter') throw new Error('Ce passage ne peut pas être préparé.');
+        // Some compatible backends omit finish_reason on otherwise complete responses.
+        if (!finish) return content;
+        lastError = 'La fiche n’a pas été terminée.';
+      } catch (error) {
+        if (error instanceof Error && /refusée|ne peut pas être préparé/.test(error.message)) throw error;
+        console.warn('[auralis-summary] retry after', error instanceof Error ? error.name : 'error');
+        lastError = 'La connexion a été interrompue pendant la création de la fiche.';
+      }
+    }
+    throw new Error(lastError + ' Les étapes déjà enregistrées restent disponibles.');
   }
   const model = env('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash';
   const response = await fetch(
@@ -256,20 +368,21 @@ function splitTextForTts(text: string, maxLen = 7500): string[] {
 async function synthesizeSpeech(
   text: string,
   voiceName: string,
-  credentials: ProviderCredentials
+  credentials: ProviderCredentials,
+  route: DeepInfraSpeechRoute = 'openai'
 ): Promise<{ buffer: Buffer; mimeType: string; extension: string }> {
   const segments = splitTextForTts(text).filter(Boolean);
   const outputs: Array<{ buffer: Buffer; mimeType: string; extension: string }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < (credentials.provider === 'deepinfra' ? 1 : 3); attempt += 1) {
       try {
-        outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials));
+        outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials, route));
         lastError = undefined;
         break;
       } catch (error) {
         lastError = error;
-        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 900 * (attempt + 1)));
+        if (credentials.provider !== 'deepinfra' && attempt < 2) await new Promise(resolve => setTimeout(resolve, 900 * (attempt + 1)));
       }
     }
     if (lastError) throw lastError;
@@ -284,28 +397,9 @@ async function synthesizeSpeech(
 
 
 
-const voicesFeatured =  [
-    ['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'],
-    ['Kore', 'Firm'], ['Fenrir', 'Excitable'], ['Leda', 'Youthful'],
-    ['Orus', 'Firm'], ['Aoede', 'Breezy'], ['Callirrhoe', 'Easy-going'],
-    ['Autonoe', 'Bright'], ['Enceladus', 'Breathy'], ['Iapetus', 'Clear'],
-    ['Umbriel', 'Easy-going'], ['Algieba', 'Smooth'], ['Despina', 'Smooth'],
-    ['Erinome', 'Clear'], ['Algenib', 'Gravelly'], ['Rasalgethi', 'Informative'],
-    ['Laomedeia', 'Upbeat'], ['Achernar', 'Soft'], ['Alnilam', 'Firm'],
-    ['Schedar', 'Even'], ['Gacrux', 'Mature'], ['Pulcherrima', 'Forward'],
-    ['Achird', 'Friendly'], ['Zubenelgenubi', 'Casual'], ['Vindemiatrix', 'Gentle'],
-    ['Sadachbia', 'Lively'], ['Sadaltager', 'Knowledgeable'], ['Sulafat', 'Warm'],
-  ].map(([id, description]) => ({
-    id,
-    name: id,
-    displayName: id,
-    description,
-    type: 'prebuilt',
-  }));
-
 type Body = Record<string, any>;
 function configured(provider: ProviderName, request: Request, body: Body = {}) {
-  const apiKey = String(body.apiKey || header(request,'x-api-key') || header(request,'x-gemini-api-key') || (
+  const apiKey = String((provider === 'deepinfra' ? env('DEEPINFRA_API_KEY') : '') || body.apiKey || header(request,'x-api-key') || header(request,'x-gemini-api-key') || (
     provider === 'deepinfra' ? env('DEEPINFRA_API_KEY') :
     provider === 'aws-polly' ? env('AWS_ACCESS_KEY_ID') : env('GEMINI_API_KEY')
   )).trim();
@@ -321,12 +415,19 @@ function classifyError(error: unknown) {
   const quota = /429|RESOURCE_EXHAUSTED|quota|throttl/i.test(message);
   const authentication = /401|403|API_KEY|permission|unauthorized|forbidden/i.test(message);
   const invalid = /400|INVALID_ARGUMENT|voice|model|malformed/i.test(message);
-  const timeout = /timeout|aborted|délai/i.test(message);
-  return { error: message, status: quota ? 429 : authentication ? 401 : invalid ? 400 : timeout ? 504 : 502 };
+  const timeout = (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) ||
+    /timeout|aborted|délai/i.test(message);
+  const publicMessage = timeout ? 'Ce passage prend trop de temps. Auralis va le découper et réessayer.' : message;
+  return { error: publicMessage, status: quota ? 429 : authentication ? 401 : invalid ? 400 : timeout ? 504 : 502 };
 }
 
 export default async function handler(request: Request): Promise<Response> {
-  const route = new URL(request.url).searchParams.get('route') || '';
+  const url = new URL(request.url);
+  // Netlify uses a custom path, so read /api/* from the original URL.
+  // Retain query-based routing for compatibility.
+  const route = url.pathname.startsWith('/api/')
+    ? url.pathname.slice('/api/'.length)
+    : (url.searchParams.get('route') || '');
   const path = '/api/' + route.replace(/^\/+/, '');
   const method = request.method.toUpperCase();
   if (method === 'OPTIONS') return new Response(null, {status: 204});
@@ -337,25 +438,11 @@ export default async function handler(request: Request): Promise<Response> {
     if (path.endsWith('/capabilities')) {
       return respond({ cloud:false, ttsConfigured:isSet, ttsProvider:provider, providers:['gemini','deepinfra','aws-polly'],chunkUpload:false,ocr:false,mode:'netlify' });
     }
-    return respond({ ok:true,provider:isSet ? provider : 'local-fallback',ttsConfigured:isSet,host:'netlify' });
+    return respond({ ok:true,provider,ttsConfigured:isSet,host:'netlify',ttsModel: 'hexgrad/Kokoro-82M',textProvider: 'deepinfra' });
   }
   if (path === '/api/voices' && method === 'GET') {
-    const apiKey = header(request,'x-api-key') || header(request,'x-gemini-api-key') || env('GEMINI_API_KEY');
-    if (!apiKey) return respond({voices:voicesFeatured,source:'featured'});
-    try {
-      const remote = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?page_size=1000',{
-        headers: {'x-goog-api-key':apiKey,Accept:'application/json'},
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!remote.ok) throw new Error('Bibliothèque de voix distante indisponible.');
-      const data = await remote.json() as any;
-      const map = new Map<string,any>(voicesFeatured.map((v:any)=>[v.id,v]));
-      for(const v of data?.voices || []) {
-        const id = String(v?.id || v?.voiceId || v?.name || '').trim();
-        if (id) map.set(id,{id,name:id,displayName:v.displayName || id,description:v.description,languageCode:v.languageCode,accent:v.accent,gender:v.gender,type:v.type});
-      }
-      return respond({voices:[...map.values()],source:'gemini-library'});
-    } catch { return respond({voices:voicesFeatured,source:'featured-fallback'}); }
+    // The preview is Kokoro-only: do not query Gemini's outdated voice catalog.
+    return respond({ voices: [{ id: 'ff_siwis', name: 'Siwis', displayName: 'Siwis · Français (Kokoro)', languageCode: 'fr-FR', type: 'prebuilt' }], source: 'deepinfra-kokoro' });
   }
   if (!path.startsWith('/api/') || method !== 'POST') {
     return respond({error:'Route API non disponible sur Netlify.'},404);
@@ -370,7 +457,8 @@ export default async function handler(request: Request): Promise<Response> {
     if (!credentials.apiKey) return respond({ok:false,error:'Ajoute la clé dans Netlify → Environment variables, ou saisis-la ici.'},503);
     if (provider === 'aws-polly' && !credentials.apiSecret) return respond({ok:false,error:'AWS_SECRET_ACCESS_KEY manquante.'},503);
     try {
-      await synthesizeProviderSpeech('Test de connexion Auralis.',provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore', credentials);
+      const speechRoute: DeepInfraSpeechRoute = body.ttsRoute === 'inference' ? 'inference' : 'openai';
+      await synthesizeProviderSpeech('Test de connexion Auralis.',provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore', credentials, speechRoute);
       return respond({ok:true,provider,message:'Connexion fournisseur validée.'});
     } catch (err) { const e=classifyError(err); return respond({ok:false,error:e.error},e.status); }
   }
@@ -381,7 +469,8 @@ export default async function handler(request: Request): Promise<Response> {
     if (!credentials.apiKey) return respond({error:'Clé API manquante : configure-la dans Netlify.'},503);
     try {
       const voice = String(body.voice || (provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore')).slice(0,128);
-      const audio = await synthesizeSpeech(text,voice,credentials);
+      const speechRoute: DeepInfraSpeechRoute = body.ttsRoute === 'inference' ? 'inference' : 'openai';
+      const audio = await synthesizeSpeech(text,voice,credentials,speechRoute);
       // Stream as binary rather than base64 JSON (Netlify's buffered 6 MB limit).
       const bytes = audio.buffer;
       if (bytes.byteLength > 19 * 1024 * 1024) return respond({error:'Audio trop volumineux, découpe le texte.'},413);
@@ -405,103 +494,128 @@ export default async function handler(request: Request): Promise<Response> {
     if (provider === 'aws-polly') return respond({error:'Amazon Polly ne produit pas de résumé. Utilise Gemini ou DeepInfra.'},400);
     if (!credentials.apiKey) return respond({error:'Clé API du fournisseur manquante dans Netlify.'},503);
     const chapterText = typeof body.chapterText === 'string' ? body.chapterText : '';
+    const summaryParts: string[] = Array.isArray(body.summaryParts)
+      ? body.summaryParts.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 24)
+      : [];
     const chapterTitle = typeof body.chapterTitle === 'string' ? body.chapterTitle.slice(0,250) : '';
     const bookTitle = typeof body.bookTitle === 'string' ? body.bookTitle.slice(0,250) : '';
     const previousChaptersContext = typeof body.previousChaptersContext === 'string' ? body.previousChaptersContext.slice(0,12000) : '';
-    if (!chapterText.trim()) return respond({error:'Texte du chapitre requis.'},400);
+    if (!chapterText.trim() && !summaryParts.length) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-      const prompt = `Tu es une IA spécialisée dans la compréhension, la synthèse et la mémorisation de livres.
+    const summaryMode = ['notes', 'overview', 'actions', 'essentials', 'understanding', 'takeaways', 'application'].includes(body.summaryMode)
+      ? String(body.summaryMode) : 'final';
+      // Short, factual intermediate notes keep long chapters affordable and
+      // prevent expensive full-length summaries at every merge level.
+      const source = summaryParts.length
+        ? summaryParts.map((part, index) => 'PASSAGE ' + (index + 1) + ':\n' + part).join('\n\n')
+        : chapterText.slice(0, 14000);
+      const compactPrompt = `Extrais les informations essentielles du passage suivant pour construire une future fiche de lecture.
+Écris uniquement en français, sans mentionner les outils techniques.
+Sois fidèle au texte, n'invente rien. Préserve les faits, distinctions et conseils uniques, sans répétition.
+Pour la NON-FICTION : note l'objectif, les concepts importants et surtout CHAQUE action concrète, méthode ou exercice réellement cité avec son utilité. Distingue les déductions des consignes explicites.
+Pour la FICTION : note les actions, objectifs, obstacles, décisions et plans explicites des personnages, les rebondissements et les incertitudes. Ne révèle pas la suite.
+Réponds en listes courtes, avec 200 à 320 mots maximum. Conserve en priorité chaque action distincte réellement mentionnée. Ne rédige pas encore la fiche complète.
+CHAPITRE : ${chapterTitle}
+TEXTE OU NOTES À COMPRESSER :
+${source}`;
+      // Split the final result into two intentionally bounded sections. A dense
+      // chapter can no longer consume the entire budget before the action plan.
+      const overviewPrompt = `Rédige UNIQUEMENT les deux premières sections d'une fiche de lecture en français, sans mentionner l'intelligence artificielle.
+Utilise exactement ces titres :
+### L'essentiel en quelques lignes
+4 à 5 phrases sur l'objectif et les enseignements principaux.
+### Comprendre le chapitre
+Explication précise mais synthétique (220 à 350 mots maximum au total pour ces deux sections), articulant concepts, arguments, exemples et causes.
+Le texte est un livre pratique ou un roman : adapte l'explication à sa nature.
+Aucune action inventée, aucune répétition, aucune conclusion hors sections. Termine par une phrase complète.
+LIVRE : ${bookTitle}
+CHAPITRE : ${chapterTitle}
+TEXTE ET NOTES DE LECTURE :
+${source}`;
 
-Ta mission est d’analyser le chapitre fourni et de produire un résumé extrêmement utile pour une personne qui écoute le livre sous forme de livre audio.
+      const actionsPrompt = `Rédige UNIQUEMENT les DEUX DERNIÈRES SECTIONS d'une fiche de lecture de chapitre en français. N'explique pas le fonctionnement technique.
+Détermine s'il s'agit d'un texte de NON-FICTION (essai, méthode, ouvrage pédagogique) ou de FICTION (roman, récit).
+NON-FICTION : utilise exactement ces titres :
+### Ce qu'il faut retenir
+3 à 6 idées complémentaires et précises, sans refaire le résumé.
+### Passer à la pratique
+Détaille une liste numérotée des actions, exercices, étapes, choix, méthodes et démarches concrètes réellement proposés dans le chapitre pour atteindre son objectif. Pour chaque action : quoi faire, comment et pourquoi quand l'auteur le précise. Conserve les étapes différentes, dans un ordre logique. Marque "Piste d'application" les conseils déduits plutôt qu'explicites.
+FICTION : utilise exactement ces titres :
+### Les personnages et leur stratégie
+Pour chaque personnage important : objectifs, décisions, plans explicites, obstacles et conséquences. N'invente rien.
+### Les tournants de l'histoire
+Faits qui transforment l'intrigue, sans prédire la suite.
+Ne répète pas les sections d'introduction. Vise 300 à 500 mots maximum. Termine par une phrase complète. Ne rédige aucune section supplémentaire.
+LIVRE : ${bookTitle}
+CHAPITRE : ${chapterTitle}
+TEXTE ET NOTES DE LECTURE :
+${source}`;
 
-L’objectif n’est PAS simplement de raccourcir le texte.
+      // Four independent, small completions replace two long, timeout-prone finals.
+      const sectionPrompts: Record<string, string> = {
+        essentials: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nTitre exact : ### L'essentiel en quelques lignes\nRésume le but central et 3 à 5 idées majeures en 70 à 110 mots maximum. Aucun développement détaillé." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        understanding: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nTitre exact : ### Comprendre le chapitre\nExplique le raisonnement, les concepts, leurs relations causales et 2 exemples distincts en 140 à 210 mots maximum. Sans introduction ni conclusion." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        takeaways: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nPour un chapitre de non-fiction, titre exact : ### Ce qu'il faut retenir ; rédige 4 à 6 points précis en 90 à 150 mots.\nPour un chapitre de fiction, titre exact : ### Les personnages et leur stratégie ; expose les objectifs, décisions et obstacles réellement présents (90 à 150 mots). Choisis une seule structure adaptée au texte." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        application: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nPour un chapitre de non-fiction, titre exact : ### Passer à la pratique ; liste 4 à 8 étapes, méthodes ou exercices explicites. Pour chaque point, donne quoi faire, comment et dans quel but, si les notes le permettent. Marque clairement « Piste d'application » toute déduction. 150 à 230 mots maximum.\nPour un chapitre de fiction, titre exact : ### Les tournants de l'histoire ; rapporte seulement les événements, décisions et conséquences du chapitre (150 à 200 mots). Choisis une seule structure adaptée au texte." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+      };
+      const prompt = sectionPrompts[summaryMode] || (summaryMode === 'overview' ? overviewPrompt
+        : summaryMode === 'actions' ? actionsPrompt
+        : summaryMode === 'notes' ? compactPrompt
+        : `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
+Lis le texte fourni, identifie si c'est une fiction ou une non-fiction et adapte le contenu.
+Ne parle jamais d'IA, de modèle, d'outil, de traitement ou de procédé technique.
+Écris en français naturel, clair et concret. Ne répète pas la même idée dans plusieurs sections.
 
-Le résumé doit permettre à l’utilisateur :
-- de comprendre ce qui s’est passé ou ce qui a été expliqué ;
-- de retenir les informations essentielles ;
-- de reprendre facilement son écoute plus tard ;
-- de comprendre le chapitre suivant sans avoir besoin de réécouter celui-ci.
+RÈGLES DE FIABILITÉ
+- Appuie-toi uniquement sur le chapitre fourni. Le contexte des chapitres précédents sert uniquement à comprendre les références.
+- Ne révèle rien des chapitres suivants, ne prédis rien, n'invente ni fait, ni action, ni intention, ni citation.
+- Si un conseil est une déduction plutôt qu'une consigne explicite de l'auteur, indique « Piste d'application ».
+- Si un objectif ou un plan n'est pas explicité dans la fiction, indique-le et décris seulement les indices et choix effectivement observables.
+- N'utilise que les sections suivantes, sans séparateurs ---, sans emojis et sans conclusions redondantes.
+- Adapte la longueur à la densité du chapitre, 350 à 650 mots maximum au total.
 
-IMPORTANT — ANTI-SPOILER
+STRUCTURE COMMUNE :
+### L'essentiel en quelques lignes
+4 à 6 phrases donnant l'idée ou le mouvement central, sans formule creuse.
+### Comprendre le chapitre
+Explication structurée des faits ou des idées, avec leurs causes, exemples importants et conséquences. Ne répète pas l'introduction.
 
-Tu dois te baser principalement sur le chapitre fourni.
-Tu peux utiliser le contexte des chapitres précédents uniquement pour comprendre les références, personnages, événements ou concepts déjà introduits.
-Tu ne dois JAMAIS révéler une information provenant d’un chapitre suivant.
-Ne prédis pas la suite de l’histoire.
-Ne transforme pas des indices en certitudes.
-Si une information n’est pas explicitement présente dans le chapitre, ne l’invente pas.
+POUR UNE NON-FICTION (essai, développement personnel, pratique, histoire, sciences, enseignement, documentaire), AJOUTE :
+### Ce qu'il faut retenir
+3 à 5 idées distinctes et précises, avec le sens des concepts utiles, sans répéter le résumé détaillé.
+### Passer à la pratique
+Repère TOUTES les actions, méthodes, exercices, habitudes, stratégies ou décisions réellement proposées dans ce chapitre et qui aident à atteindre son objectif. Présente-les dans un ordre concret et logique, sous forme de liste numérotée, avec « quoi faire », « comment » et « dans quel but » lorsque le texte permet de le préciser. Inclus les conditions, étapes, indicateurs et obstacles si le chapitre en parle. Si aucune méthode n'est donnée, indique « Aucune action précise n'est proposée dans ce chapitre » et ajoute au maximum deux pistes d'application clairement distinguées des conseils de l'auteur.
 
-ADAPTATION AU TYPE DE LIVRE
+POUR UNE FICTION (roman, nouvelle, récit narratif), AJOUTE :
+### Les personnages et leur stratégie
+Pour chaque personnage important, précise son objectif du moment, son plan ou intention quand il est explicite, les actions et décisions prises, les obstacles rencontrés, leurs conséquences et ce qui reste incertain. Distingue toujours faits, suppositions des personnages et interprétations. S'il n'y a pas de stratégie définie, dis-le.
+### Les tournants de l'histoire
+Décris les événements qui modifient les enjeux, les relations ou la situation. Pas de prédictions ni de spoilers.
 
-Commence par identifier silencieusement le type de contenu :
-- roman / fiction ;
-- biographie ;
-- histoire ;
-- essai ;
-- développement personnel ;
-- business ;
-- philosophie ;
-- sciences ;
-- manuel scolaire ;
-- livre professionnel ;
-- autre contenu documentaire.
+Garde exactement les titres ### indiqués pour le type de livre retenu. Utilise des listes courtes et lisibles lorsque nécessaire, sans ajouter d'autres rubriques.
 
-Adapte ensuite le résumé au type de livre.
-Pour une fiction, privilégie : événements, personnages, décisions, conflits, révélations, évolution des personnages, causes et conséquences.
-Pour un livre documentaire, privilégie : idées, concepts, arguments, méthodes, exemples importants, chiffres réellement utiles, conclusions, applications pratiques.
-Ne force jamais une catégorie qui n’a pas de sens.
+LIVRE : ${bookTitle || 'Livre'}
+CHAPITRE : ${chapterTitle || 'Chapitre'}
+${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
+SOURCE À ANALYSER :
+${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`);
 
-STRUCTURE DE SORTIE STRICTE (utilise exactement ces titres avec ces émojis) :
-
-### ⚡ Le chapitre en 30 secondes
-(Résume le chapitre en 3 à 6 phrases maximum. Va directement à l'information importante sans phrase d'introduction générique.)
-
----
-
-### 📖 Résumé détaillé
-(Produis un résumé clair, fluide et structuré de 150 à 400 mots respectant l'ordre logique ou chronologique.)
-
----
-
-### 🧠 À retenir
-(Sélectionne entre 3 et 7 éléments maximum, courts, précis et faciles à mémoriser sous forme de puces tirets.)
-
----
-
-### 👥 Personnages importants
-(Affiche cette section uniquement si des personnages jouent un rôle significatif : **Nom du personnage** — rôle dans le chapitre, action importante ou évolution notable.)
-
-OU (si le livre n'est pas narratif) :
-
-### 💡 Concepts importants
-(**Nom du concept** — définition ou rôle expliqué simplement en une ou deux phrases.)
-
----
-
-### 🔗 Pourquoi ce chapitre est important
-(Explique en 2 à 4 phrases le rôle de ce chapitre dans l’ensemble du livre, sans spoiler la suite.)
-
----
-
-### 🎯 Si tu ne devais retenir qu’une seule chose
-(Écris UNE seule phrase forte représentant le cœur ou la leçon essentielle du chapitre.)
-
----
-
-DONNÉES FOURNIES :
-TITRE DU LIVRE : ${bookTitle || 'Livre audio'}
-TITRE DU CHAPITRE : ${chapterTitle || 'Chapitre'}
-${previousChaptersContext ? `CONTEXTE DES CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
-CONTENU DU CHAPITRE :
-${chapterText.slice(0, 48000)}`;
-
-      const summary = await generateTextWithProvider(prompt, credentials);
+      const tokenLimit = summaryMode === 'essentials' ? 550
+        : summaryMode === 'understanding' ? 1100
+        : summaryMode === 'takeaways' ? 750
+        : summaryMode === 'application' ? 1200
+        : summaryMode === 'notes' ? 2200
+        : summaryMode === 'overview' ? 2600
+        : summaryMode === 'actions' ? 3400 : 3500;
+      const summary = await generateTextWithProvider(prompt, credentials, tokenLimit);
       return respond({summary,provider});
     } catch(err) { const e=classifyError(err); return respond({error:e.error},e.status); }
   }
   return respond({error:'Route API non migrée.'},404);
 }
 export const config = {
+  // Serve the original /api/* URL directly instead of a rewrite that lost its route.
+  path: '/api/*',
   rateLimit: { action:'rate_limit', aggregateBy:['ip'],windowSize:60,windowLimit:90 }
 };

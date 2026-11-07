@@ -9,7 +9,6 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
-    "postinstall": "node scripts/patch-piper.mjs",
     "dev:standalone": "concurrently -k -n web,api \"vite\" \"node server/index.mjs\"",
     "dev:web": "vite",
     "dev:api": "node server/index.mjs",
@@ -18,11 +17,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@mintplex-labs/piper-tts-web": "^1.0.5",
     "express": "^5.2.1",
     "fflate": "^0.8.3",
     "lucide-react": "^0.469.0",
-    "onnxruntime-web": "^1.30.0",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

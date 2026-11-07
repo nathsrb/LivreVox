@@ -11,12 +11,8 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# Conserver exactement la route demandée pour le handler serverless.
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/api?route=:splat"
-  status = 200
-  force = true
+# API handled directly by netlify/functions/api.mts: config.path = '/api/*'.
+# No rewrite: the old query-string redirect made /api/health and /api/voices return 404.
 
 # Navigation React : rafraîchir une page garde l'application.
 [[redirects]]

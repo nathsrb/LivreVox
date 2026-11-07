@@ -9,6 +9,10 @@ export type Chapter = {
   pageStart?: number;
   pageEnd?: number;
   summary?: string;
+  summaryProvisional?: boolean;
+  /** Preserved across reloads: a browser tab cannot continue generating while closed. */
+  summaryStatus?: 'in_progress' | 'interrupted' | 'complete';
+  summaryStartedAt?: number;
   summaryLoading?: boolean;
   lastPositionSeconds?: number;
 };
@@ -38,6 +42,9 @@ export type AudioRecord = {
   chapterId: string;
   voiceId: string;
   blob: Blob;
+  /** Long chapters play as consecutive parts, but still appear as one chapter. */
+  parts?: Blob[];
+  partDurations?: number[];
   duration: number;
   createdAt: number;
 };
@@ -46,9 +53,7 @@ export type TtsProvider = 'gemini' | 'deepinfra' | 'aws-polly';
 
 export type AppSettings = {
   rate: number;
-  voiceId: string;
   cloudVoice?: string;
-  systemVoiceUri: string;
   ocrLang: 'fra' | 'eng' | 'fra+eng';
   autoOcr: boolean;
   ttsProvider?: TtsProvider;
