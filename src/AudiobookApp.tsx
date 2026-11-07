@@ -248,6 +248,7 @@ export default function AudiobookApp() {
   const [deleteChapterTarget, setDeleteChapterTarget] = useState<Chapter | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryProgress, setSummaryProgress] = useState('');
+  const [savedSummaryWork, setSavedSummaryWork] = useState<{ chapterKey: string; count: number } | null>(null);
   const [keyTestStatus, setKeyTestStatus] = useState<'idle' | 'testing' | 'valid' | 'invalid'>('idle');
   const [keyTestError, setKeyTestError] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<{ fileName: string; incorrect: boolean } | null>(null);
@@ -360,6 +361,24 @@ export default function AudiobookApp() {
       Math.floor(progress * paragraphs.length)
     );
   }, [paragraphs.length, playableAudioUrl, audioDuration, audioCurrentTime]);
+
+  // Recover completed local analysis work when the user returns to a chapter.
+  // The generation itself cannot run while the browser page is unloaded.
+  useEffect(() => {
+    if (!selectedBook || !selectedChapter) {
+      setSavedSummaryWork(null);
+      return;
+    }
+    let cancelled = false;
+    const chapterKey = selectedBook.id + ':' + selectedChapter.id;
+    void getSummarySegments(selectedBook.id, selectedChapter.id).then(segments => {
+      if (!cancelled) setSavedSummaryWork({ chapterKey, count: segments.length });
+    }).catch(error => {
+      console.warn('Auralis: unable to inspect saved summary progress', error);
+      if (!cancelled) setSavedSummaryWork({ chapterKey, count: 0 });
+    });
+    return () => { cancelled = true; };
+  }, [selectedBook?.id, selectedChapter?.id, summaryLoading]);
 
   useEffect(() => {
     void (async () => {
@@ -2155,7 +2174,10 @@ export default function AudiobookApp() {
                           <>
                             <RefreshCw size={14} className="animate-spin" /> Préparation en cours…
                           </>
-                        ) : selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted' ? (
+                        ) : selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted' ||
+                          (!selectedChapter.summary &&
+                            savedSummaryWork?.chapterKey === selectedBook.id + ':' + selectedChapter.id &&
+                            savedSummaryWork.count > 0) ? (
                           <>
                             <RotateCcw size={14} /> Reprendre la fiche
                           </>
@@ -2172,6 +2194,14 @@ export default function AudiobookApp() {
                     </div>
                     {summaryLoading && summaryProgress && (
                       <p className="lv-summary-note" role="status">{summaryProgress}</p>
+                    )}
+                    {!summaryLoading && !selectedChapter.summary &&
+                      savedSummaryWork?.chapterKey === selectedBook.id + ':' + selectedChapter.id &&
+                      savedSummaryWork.count > 0 && (
+                      <p className="lv-summary-note" role="status">
+                        {savedSummaryWork.count} étape(s) d'analyse sauvegardée(s) sur cet appareil.
+                        La fiche n'a pas encore été assemblée. Clique sur « Reprendre la fiche » pour continuer sans recommencer ces étapes.
+                      </p>
                     )}
                     {(selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted') && !summaryLoading && (
                       <p className="lv-summary-note" role="status">
