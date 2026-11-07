@@ -1727,7 +1727,7 @@ export default function AudiobookApp() {
                             className="lv-icon-button"
                             style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
                             onClick={() => setTab('summary')}
-                            title="Ouvrir le Fiche de lecture de ce chapitre"
+                            title="Ouvrir la fiche de lecture de ce chapitre"
                           >
                             <Brain size={13} />
                             <span>Fiche de lecture</span>
@@ -1924,7 +1924,7 @@ export default function AudiobookApp() {
                           onClick={() => void generateChapterSummary(selectedChapter)}
                           disabled={summaryLoading}
                         >
-                          <Sparkles size={15} /> {summaryLoading ? 'Analyse IA...' : 'Créer ma fiche'}
+                          <Sparkles size={15} /> {summaryLoading ? 'Préparation...' : 'Créer ma fiche'}
                         </button>
                       </div>
                     )}
@@ -1936,10 +1936,10 @@ export default function AudiobookApp() {
                 <section className="lv-export-stack">
                   <div className="lv-card lv-export-hero">
                     <div className="lv-badge">
-                      <Volume2 size={13} /> 'Écoute personnalisée'
+                      <Volume2 size={13} /> Écoute personnalisée
                     </div>
                     <h2>{isCloudBook ? 'Ton livre prend vie' : 'Crée ton livre audio'}</h2>
-                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis une voix, puis prépare un chapitre ou tout le livre. Tes fichiers audio restent enregistrés sur cet appareil.'}</p>
+                    <p>{isCloudBook ? `Ton livre se prépare chapitre par chapitre. Progression : ${selectedBook.cloudProcessingProgress ?? 0} %.` : 'Choisis une voix, puis prépare un chapitre ou tout le livre. Tes fichiers audio restent enregistrés sur cet appareil.'}</p>
                     <div className="lv-stat-grid">
                       <div className="lv-stat">
                         <strong>
@@ -1948,13 +1948,11 @@ export default function AudiobookApp() {
                         <span>chapitres prêts</span>
                       </div>
                       <div className="lv-stat">
-                        <strong>
-                          'À ton rythme'
-                        </strong>
-                        <span>'Écoute'</span>
+                        <strong>À ton rythme</strong>
+                        <span>Voix personnalisée</span>
                       </div>
                       <div className="lv-stat">
-                        <strong>'Audio'</strong>
+                        <strong>Audio</strong>
                         <span>{isCloudBook ? 'chapitres à écouter' : 'à télécharger'}</span>
                       </div>
                     </div>
@@ -1969,7 +1967,7 @@ export default function AudiobookApp() {
                           <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
                             <RotateCcw size={15} /> Reprendre la préparation
                           </button>
-                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Créer l'audio du chapitre via IA</button>}
+                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Créer l'audio du chapitre</button>}
                         </>
                       ) : (
                         <>
@@ -2065,8 +2063,8 @@ export default function AudiobookApp() {
                     ))}
                   </div>
 
-                  {/* Export du Code Source Complet */}
-                  <div className="lv-card" style={{ marginTop: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                  {/* Options de développement hors du parcours grand public */}
+                  <div className="lv-card lv-developer-control" style={{ marginTop: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
                     <div>
                       <strong style={{ fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <Download size={16} style={{ color: '#818cf8' }} /> Code Source Complet du Projet (.zip)
@@ -2256,7 +2254,7 @@ export default function AudiobookApp() {
                   }
                 />
                 <span>
-                  Activer automatiquement l’Documents numérisés lorsque PDF.js ne trouve
+                  Essayer de lire les pages scannées lorsque le document ne contient
                   pas de texte lisible.
                 </span>
               </label>
@@ -2283,7 +2281,7 @@ export default function AudiobookApp() {
             <div className="lv-field">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <label htmlFor="provider-key">
-                  'Code de connexion (facultatif)'
+                  Code de connexion (facultatif)
                 </label>
                 {settings.apiKey?.trim() ? (
                   <span style={{ fontSize: '11px', color: '#4ade80', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
