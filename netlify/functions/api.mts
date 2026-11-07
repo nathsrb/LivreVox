@@ -185,8 +185,13 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
       throw new Error(`DeepInfra résumé (${response.status}): ${detail}`);
     }
     const payload = await response.json() as any;
-    const summary = payload?.choices?.[0]?.message?.content;
-    if (typeof summary !== 'string' || !summary.trim()) throw new Error('DeepInfra a renvoyé un résumé vide.');
+    const choice = payload?.choices?.[0];
+    const summary = choice?.message?.content;
+    if (typeof summary !== 'string' || !summary.trim())
+      throw new Error('Le service a renvoyé une fiche vide.');
+    // An HTTP 200 can still contain a cut-off answer when the output budget is exhausted.
+    if (choice?.finish_reason === 'length' || choice?.finish_reason === 'max_tokens')
+      throw new Error('Fiche incomplète : la réponse s’est arrêtée avant la fin. Réessaie.');
     return summary.trim();
   }
   const model = env('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash';
@@ -410,7 +415,8 @@ export default async function handler(request: Request): Promise<Response> {
     if (!chapterText.trim() && !summaryParts.length) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-    const summaryMode = body.summaryMode === 'notes' ? 'notes' : 'final';
+    const summaryMode = ['notes', 'overview', 'actions'].includes(body.summaryMode)
+      ? String(body.summaryMode) : 'final';
       // Short, factual intermediate notes keep long chapters affordable and
       // prevent expensive full-length summaries at every merge level.
       const source = summaryParts.length
@@ -421,11 +427,47 @@ export default async function handler(request: Request): Promise<Response> {
 Sois fidèle au texte, n'invente rien. Préserve les faits, distinctions et conseils uniques, sans répétition.
 Pour la NON-FICTION : note l'objectif, les concepts importants et surtout CHAQUE action concrète, méthode ou exercice réellement cité avec son utilité. Distingue les déductions des consignes explicites.
 Pour la FICTION : note les actions, objectifs, obstacles, décisions et plans explicites des personnages, les rebondissements et les incertitudes. Ne révèle pas la suite.
-Réponds en listes brèves, avec 130 à 220 mots au maximum. Ne rédige pas encore la fiche complète.
+Réponds en listes courtes, avec 200 à 320 mots maximum. Conserve en priorité chaque action distincte réellement mentionnée. Ne rédige pas encore la fiche complète.
 CHAPITRE : ${chapterTitle}
 TEXTE OU NOTES À COMPRESSER :
 ${source}`;
-      const prompt = summaryMode === 'notes' ? compactPrompt : `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
+      // Split the final result into two intentionally bounded sections. A dense
+      // chapter can no longer consume the entire budget before the action plan.
+      const overviewPrompt = `Rédige UNIQUEMENT les deux premières sections d'une fiche de lecture en français, sans mentionner l'intelligence artificielle.
+Utilise exactement ces titres :
+### L'essentiel en quelques lignes
+4 à 5 phrases sur l'objectif et les enseignements principaux.
+### Comprendre le chapitre
+Explication précise mais synthétique (220 à 350 mots maximum au total pour ces deux sections), articulant concepts, arguments, exemples et causes.
+Le texte est un livre pratique ou un roman : adapte l'explication à sa nature.
+Aucune action inventée, aucune répétition, aucune conclusion hors sections. Termine par une phrase complète.
+LIVRE : ${bookTitle}
+CHAPITRE : ${chapterTitle}
+TEXTE ET NOTES DE LECTURE :
+${source}`;
+
+      const actionsPrompt = `Rédige UNIQUEMENT les DEUX DERNIÈRES SECTIONS d'une fiche de lecture de chapitre en français. N'explique pas le fonctionnement technique.
+Détermine s'il s'agit d'un texte de NON-FICTION (essai, méthode, ouvrage pédagogique) ou de FICTION (roman, récit).
+NON-FICTION : utilise exactement ces titres :
+### Ce qu'il faut retenir
+3 à 6 idées complémentaires et précises, sans refaire le résumé.
+### Passer à la pratique
+Détaille une liste numérotée des actions, exercices, étapes, choix, méthodes et démarches concrètes réellement proposés dans le chapitre pour atteindre son objectif. Pour chaque action : quoi faire, comment et pourquoi quand l'auteur le précise. Conserve les étapes différentes, dans un ordre logique. Marque "Piste d'application" les conseils déduits plutôt qu'explicites.
+FICTION : utilise exactement ces titres :
+### Les personnages et leur stratégie
+Pour chaque personnage important : objectifs, décisions, plans explicites, obstacles et conséquences. N'invente rien.
+### Les tournants de l'histoire
+Faits qui transforment l'intrigue, sans prédire la suite.
+Ne répète pas les sections d'introduction. Vise 300 à 500 mots maximum. Termine par une phrase complète. Ne rédige aucune section supplémentaire.
+LIVRE : ${bookTitle}
+CHAPITRE : ${chapterTitle}
+TEXTE ET NOTES DE LECTURE :
+${source}`;
+
+      const prompt = summaryMode === 'overview' ? overviewPrompt
+        : summaryMode === 'actions' ? actionsPrompt
+        : summaryMode === 'notes' ? compactPrompt
+        : `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
 Lis le texte fourni, identifie si c'est une fiction ou une non-fiction et adapte le contenu.
 Ne parle jamais d'IA, de modèle, d'outil, de traitement ou de procédé technique.
 Écris en français naturel, clair et concret. Ne répète pas la même idée dans plusieurs sections.
@@ -464,7 +506,10 @@ ${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext
 SOURCE À ANALYSER :
 ${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`;
 
-      const summary = await generateTextWithProvider(prompt, credentials, summaryMode === 'notes' ? 650 : 1600);
+      const tokenLimit = summaryMode === 'notes' ? 900
+        : summaryMode === 'overview' ? 1500
+        : summaryMode === 'actions' ? 2400 : 3000;
+      const summary = await generateTextWithProvider(prompt, credentials, tokenLimit);
       return respond({summary,provider});
     } catch(err) { const e=classifyError(err); return respond({error:e.error},e.status); }
   }
