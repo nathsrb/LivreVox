@@ -148,23 +148,28 @@ function loadSettings(): AppSettings {
 }
 
 function renderFormattedSummary(text: string) {
-  const sections = text.split(/(?=### )/g).filter(Boolean);
+  const sections = text.split(/(?=^###\s)/gm).map(part => part.trim()).filter(Boolean);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {sections.map((sec, idx) => {
-        const lines = sec.trim().split('\n');
-        const header = lines[0].replace(/^###\s*/, '').trim();
-        const body = lines.slice(1).join('\n').replace(/^---\s*$/gm, '').trim();
-        const isHighlight = header.includes('30 secondes') || header.includes('retenir qu’une seule chose');
-
-        return (
-          <div key={idx} className={`lv-summary-section ${isHighlight ? 'lv-summary-highlight-box' : ''}`}>
-            <h3>{header}</h3>
-            <div style={{ whiteSpace: 'pre-wrap', fontSize: '14px', lineHeight: 1.65 }}>
-              {body}
-            </div>
+    <div className="lv-summary-sections">
+      {sections.map((section, index) => {
+        const [heading, ...lines] = section.split('\n');
+        const title = heading.replace(/^###\s*/, '').trim();
+        const blocks = lines.join('\n').trim().split(/\n\s*\n/).filter(Boolean);
+        return <section className="lv-summary-section" key={index}>
+          <h3>{title}</h3>
+          <div className="lv-summary-prose">
+            {blocks.map((block, p) => {
+              const rows = block.split('\n').filter(Boolean);
+              const list = rows.every(line => /^\s*(?:[-*]\s+|\d+[.)]\s+)/.test(line));
+              if (list) {
+                const ordered = rows.every(line => /^\s*\d+[.)]\s+/.test(line));
+                const entries = rows.map((line, j) => <li key={j}>{line.replace(/^\s*(?:[-*]\s+|\d+[.)]\s+)/, '').replace(/\*\*/g, '')}</li>);
+                return ordered ? <ol key={p}>{entries}</ol> : <ul key={p}>{entries}</ul>;
+              }
+              return <p key={p}>{block.replace(/\*\*/g, '')}</p>;
+            })}
           </div>
-        );
+        </section>;
       })}
     </div>
   );
@@ -627,7 +632,7 @@ export default function AudiobookApp() {
     setImportProgress(null);
     if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
     else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
-    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte prêt. Le service IA doit être configuré sur Netlify pour générer l’audio.');
+    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte prêt. L'écoute n'est pas disponible pour le moment.');
   }
 
   async function importLocalFile(file: File): Promise<void> {
@@ -681,8 +686,8 @@ export default function AudiobookApp() {
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
     setImportProgress(null);
-    showToast('Le premier contenu est prêt. Le reste du livre continue maintenant dans le cloud.');
-    void continueCloudPipeline(jobId, file, book.id).catch(error => { setImportProgress(null); showToast(error instanceof Error ? error.message : 'Le traitement cloud a été interrompu.', true); });
+    showToast('Les premiers chapitres sont prêts, les autres sont en cours de préparation.');
+    void continueCloudPipeline(jobId, file, book.id).catch(error => { setImportProgress(null); showToast(error instanceof Error ? error.message : 'La préparation du livre a été interrompue.', true); });
   }
 
   async function importFile(file: File): Promise<void> {
@@ -855,12 +860,30 @@ export default function AudiobookApp() {
       };
       await putBook(updatedBook);
       setBooks(current => current.map(b => (b.id === updatedBook.id ? updatedBook : b)));
-      showToast('✨ Résumé IA généré avec succès !');
+      showToast('✨ Fiche de lecture prête !');
     } catch (err: any) {
-      showToast(err?.message || 'Erreur lors du résumé IA', true);
+      showToast(err?.message || 'Impossible de préparer cette fiche', true);
     } finally {
       setSummaryLoading(false);
     }
+  }
+
+  async function copyChapterSummary(text: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        if (!copied) throw new Error('Copie impossible');
+      }
+      showToast('Fiche copiée. Tu peux la coller où tu veux.');
+    } catch { showToast('La copie a échoué. Sélectionne le texte de la fiche pour le copier.', true); }
   }
 
   async function playSummaryWithIA(summaryText: string): Promise<void> {
@@ -883,10 +906,10 @@ export default function AudiobookApp() {
         audioRef.current.currentTime = 0;
         await audioRef.current.play();
         setAudioPlaying(true);
-        showToast('Lecture du résumé IA lancée');
+        showToast('Lecture de la fiche lancée');
       }
     } catch (err: any) {
-      showToast(err?.message || 'Erreur de lecture du résumé', true);
+      showToast(err?.message || 'Impossible de lire cette fiche', true);
     } finally {
       setGeneration(null);
     }
@@ -1014,7 +1037,7 @@ export default function AudiobookApp() {
 
   async function ensureVoiceReady(): Promise<boolean> {
     if (await isRemoteTtsAvailable(false, settings.apiKey)) return true;
-    showToast('Le fournisseur IA est indisponible sur Netlify. Vérifie sa configuration.', true);
+    showToast('Le service de lecture est momentanément indisponible. Réessaie dans un instant.', true);
     return false;
   }
 
@@ -1058,7 +1081,7 @@ export default function AudiobookApp() {
       return record;
     } catch (error) {
       showToast(
-        error instanceof Error ? error.message : 'Génération audio impossible.',
+        error instanceof Error ? error.message : 'Impossible de créer cet audio.',
         true
       );
       return null;
@@ -1195,7 +1218,7 @@ export default function AudiobookApp() {
           </div>
           <div>
             <strong>Auralis</strong>
-            <small>Livre audio IA & Résumés</small>
+            <small>Vos livres, autrement</small>
           </div>
         </div>
         <button className="lv-primary" onClick={() => fileRef.current?.click()}>
@@ -1236,7 +1259,7 @@ export default function AudiobookApp() {
           <div className="lv-private-card">
             <LockKeyhole size={15} />
             <span>
-              Import local de PDF. Les voix et résumés IA sont générés uniquement sur demande.
+              Tes livres restent sur cet appareil. Prépare leur version audio ou une fiche de lecture quand tu le souhaites.
             </span>
           </div>
         </div>
@@ -1252,7 +1275,7 @@ export default function AudiobookApp() {
             <span>
               {selectedBook
                 ? 'Bibliothèque locale'
-                : 'Convertisseur PDF → livre audio'}
+                : 'Votre bibliothèque audio'}
             </span>
           </div>
           <div className="lv-top-actions">
@@ -1270,14 +1293,14 @@ export default function AudiobookApp() {
                   gap: '5px',
                   fontWeight: 500,
                 }}
-                title="Vos identifiants API sont chargés et actifs"
+                title="Lecture disponible"
               >
                 <CheckCircle2 size={12} />
-                <span>API {settings.ttsProvider || 'gemini'} connectée</span>
+                <span>Prêt à écouter</span>
               </span>
             ) : null}
             <button
-              className="lv-icon-button"
+              className="lv-icon-button lv-developer-control"
               title="Synchroniser avec GitHub"
               onClick={() => setGithubModalOpen(true)}
             >
@@ -1286,7 +1309,7 @@ export default function AudiobookApp() {
             <a
               href="/api/download-zip"
               download="Auralis-LivreVox-code.zip"
-              className="lv-icon-button"
+              className="lv-icon-button lv-developer-control"
               title="Télécharger tout le code source (.zip)"
               style={{ textDecoration: 'none' }}
             >
@@ -1329,13 +1352,13 @@ export default function AudiobookApp() {
             <section className="lv-empty">
               <div className="lv-hero">
                 <div className="lv-badge">
-                  <ShieldCheck size={13} /> PDF → chapitres → voix au choix → audio ou résumé
+                  <ShieldCheck size={13} /> Vos livres, à lire et à écouter
                 </div>
                 <h1>
-                  Transforme ton PDF en <em>livre audio.</em>
+                  Tes livres prennent <em>vie à l'oral.</em>
                 </h1>
                 <p>
-                  Importe ton livre sans attendre une génération audio. Parcours ses chapitres, choisis une voix Gemini et génère seulement ce que tu veux : un chapitre, tout le livre ou un résumé IA.
+                  Ajoute un livre au format PDF, retrouve ses chapitres et écoute-les à ton rythme. Pour mieux retenir l'essentiel, crée aussi une fiche de lecture claire et pratique.
                 </p>
                 <div
                   className={`lv-drop ${dragging ? 'dragging' : ''}`}
@@ -1355,8 +1378,8 @@ export default function AudiobookApp() {
                   <div className="lv-drop-icon">
                     <FileText size={25} />
                   </div>
-                  <strong>Dépose ton PDF ici</strong>
-                  <span>PDF contenant du texte · l’import ne lance aucun audio</span>
+                  <strong>Ajoute un livre à ta bibliothèque</strong>
+                  <span>Sélectionne un document PDF pour commencer</span>
                   <div className="lv-drop-actions">
                     <button
                       className="lv-primary"
@@ -1369,29 +1392,29 @@ export default function AudiobookApp() {
                       className="lv-secondary"
                       onClick={() => void addDemo()}
                     >
-                      <Sparkles size={15} /> Charger le livre démo
+                      <Sparkles size={15} /> Essayer avec un exemple
                     </button>
                   </div>
                 </div>
                 <div className="lv-features">
                   <div className="lv-feature">
                     <strong>
-                      <WandSparkles size={14} /> Chapitrage automatique
+                      <WandSparkles size={14} /> Des chapitres bien organisés
                     </strong>
-                    Détecte titres, parties et sections, avec découpage
-                    intelligent si le PDF n’en contient pas.
+                    Retrouve les titres, parties et chapitres de ton livre, avec une navigation
+                    simple et agréable.
                   </div>
                   <div className="lv-feature">
                     <strong>
-                      <Zap size={14} /> OCR local
+                      <Zap size={14} /> Documents numérisés
                     </strong>
-                    Le texte sélectionnable est importé. Les PDF uniquement scannés nécessitent encore une transcription OCR.
+                    Les documents contenant du texte fonctionnent directement. Certains PDF scannés demandent une conversion supplémentaire.
                   </div>
                   <div className="lv-feature">
                     <strong>
-                      <FileAudio size={14} /> Vrais fichiers WAV
+                      <FileAudio size={14} /> Garde tes livres audio
                     </strong>
-                    Génère les chapitres avec Gemini, puis exporte le livre
+                    Prépare les chapitres à écouter, puis télécharge le livre
                     complet dans une archive ZIP.
                   </div>
                 </div>
@@ -1407,23 +1430,23 @@ export default function AudiobookApp() {
                   <div>
                     <h1>{selectedBook.title}</h1>
                     <div className="lv-meta">
-                      <span>{selectedBook.pages || '—'} pages{selectedBook.cloudJobId ? ' · Cloud' : ' · Local'}</span>
+                      <span>{selectedBook.pages || '—'} pages</span>
                       <span>{totalWords.toLocaleString('fr-FR')} mots</span>
                       <span>~{totalMinutes} min</span>
                       <span>{formatBytes(selectedBook.sourceSize)}</span>
-                      {selectedBook.ocrUsed && <span>OCR utilisé</span>}
+                      {selectedBook.ocrUsed && <span>Texte numérisé</span>}
                     </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <div className="lv-book-actions">
                   <button className="lv-secondary" onClick={() => setSettingsOpen(true)}>
                     <Settings size={14} /> Choisir la voix
                   </button>
                   <button className="lv-secondary" onClick={() => setTab('summary')}>
-                    <Brain size={14} /> Résumé IA
+                    <Brain size={14} /> Fiche de lecture
                   </button>
                   <button className="lv-primary" onClick={() => setTab('export')}>
-                    <WandSparkles size={14} /> Générer l’audio
+                    <WandSparkles size={14} /> Créer l'audio
                   </button>
                   <button
                     className="lv-secondary"
@@ -1487,13 +1510,13 @@ export default function AudiobookApp() {
                   className={`lv-tab ${tab === 'summary' ? 'active' : ''}`}
                   onClick={() => setTab('summary')}
                 >
-                  <Brain size={15} /> Résumé IA
+                  <Brain size={15} /> Fiche de lecture
                 </button>
                 <button
                   className={`lv-tab ${tab === 'export' ? 'active' : ''}`}
                   onClick={() => setTab('export')}
                 >
-                  <Sparkles size={15} /> Générer & exporter
+                  <Sparkles size={15} /> Créer & télécharger
                 </button>
               </nav>
 
@@ -1704,10 +1727,10 @@ export default function AudiobookApp() {
                             className="lv-icon-button"
                             style={{ height: '32px', padding: '0 8px', fontSize: '12px', width: 'auto', gap: '4px' }}
                             onClick={() => setTab('summary')}
-                            title="Ouvrir le Résumé IA de ce chapitre"
+                            title="Ouvrir le Fiche de lecture de ce chapitre"
                           >
                             <Brain size={13} />
-                            <span>Résumé IA</span>
+                            <span>Fiche de lecture</span>
                           </button>
 
 
@@ -1795,7 +1818,7 @@ export default function AudiobookApp() {
                           }}
                           title="Consulter le résumé IA de cette section"
                         >
-                          <Brain size={13} /> Résumé IA
+                          <Brain size={13} /> Fiche de lecture
                         </button>
                         <button
                           className="lv-ghost lv-danger"
@@ -1824,21 +1847,26 @@ export default function AudiobookApp() {
                   <div className="lv-summary-hero">
                     <div className="lv-summary-hero-copy">
                       <h2>
-                        <Brain size={20} /> Résumé & Mémorisation IA — {selectedChapter.title}
+                        <Brain size={20} /> Comprendre et retenir — {selectedChapter.title}
                       </h2>
                       <p>
-                        Synthèse intelligente propulsée par IA : points clés, concepts, anti-spoiler et format optimisé pour l'écoute.
+                        Retrouve les idées importantes, les actions à essayer ou les choix des personnages, sans connaître la suite.
                       </p>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <div className="lv-summary-actions">
+                      {selectedChapter.summary && (
+                        <button className="lv-secondary" title="Copier la fiche" onClick={() => void copyChapterSummary(selectedChapter.summary!)}>
+                          <FileText size={14} /> Copier la fiche
+                        </button>
+                      )}
                       {selectedChapter.summary && (
                         <button
                           className="lv-secondary"
                           onClick={() => void playSummaryWithIA(selectedChapter.summary!)}
                           disabled={summaryLoading}
-                          title="Écouter la synthèse vocale IA de ce résumé"
+                          title="Écouter cette fiche"
                         >
-                          <Volume2 size={14} /> Écouter le résumé (IA)
+                          <Volume2 size={14} /> Écouter la fiche
                         </button>
                       )}
                       <button
@@ -1849,15 +1877,15 @@ export default function AudiobookApp() {
                       >
                         {summaryLoading ? (
                           <>
-                            <RefreshCw size={14} className="animate-spin" /> Analyse IA en cours...
+                            <RefreshCw size={14} className="animate-spin" /> Préparation de la fiche...
                           </>
                         ) : selectedChapter.summary ? (
                           <>
-                            <RotateCcw size={14} /> Régénérer le résumé
+                            <RotateCcw size={14} /> Actualiser la fiche
                           </>
                         ) : (
                           <>
-                            <Sparkles size={14} /> Générer le résumé de ce chapitre
+                            <Sparkles size={14} /> Créer la fiche du chapitre
                           </>
                         )}
                       </button>
@@ -1885,10 +1913,10 @@ export default function AudiobookApp() {
                       <div style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
                         <Brain size={48} style={{ margin: '0 auto 16px', opacity: 0.5, color: '#a78bfa' }} />
                         <h3 style={{ color: '#f8fafc', fontSize: '18px', marginBottom: '8px' }}>
-                          Aucun résumé pour « {selectedChapter.title} » pour le moment
+                          Aucune fiche pour « {selectedChapter.title} » pour le moment
                         </h3>
                         <p style={{ maxWidth: '520px', margin: '0 auto 20px', fontSize: '13px', lineHeight: 1.6 }}>
-                          Cliquez sur « Générer le résumé de ce chapitre » pour obtenir une analyse structurée en 6 sections : ⚡ Le chapitre en 30 secondes, 📖 Résumé détaillé, 🧠 À retenir, 👥 Personnages ou 💡 Concepts importants, 🔗 Pourquoi ce chapitre est important, et 🎯 Si tu ne devais retenir qu’une seule chose.
+                          Découvre l'essentiel du chapitre : des actions concrètes pour un livre pratique, ou les choix et les plans des personnages pour un roman.
                         </p>
                         <button
                           className="lv-primary"
@@ -1896,7 +1924,7 @@ export default function AudiobookApp() {
                           onClick={() => void generateChapterSummary(selectedChapter)}
                           disabled={summaryLoading}
                         >
-                          <Sparkles size={15} /> {summaryLoading ? 'Analyse IA...' : 'Générer avec IA'}
+                          <Sparkles size={15} /> {summaryLoading ? 'Analyse IA...' : 'Créer ma fiche'}
                         </button>
                       </div>
                     )}
@@ -1908,10 +1936,10 @@ export default function AudiobookApp() {
                 <section className="lv-export-stack">
                   <div className="lv-card lv-export-hero">
                     <div className="lv-badge">
-                      <Volume2 size={13} /> {isCloudBook ? `Pipeline cloud · ${selectedBook.cloudTtsProvider || 'préparation'}` : `Moteur IA sélectionné · ${settings.ttsProvider || 'gemini'}`}
+                      <Volume2 size={13} /> 'Écoute personnalisée'
                     </div>
-                    <h2>{isCloudBook ? 'Livre audio progressif dans le cloud' : 'Génère le vrai livre audio'}</h2>
-                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis ta voix Gemini dans les réglages, puis génère ce chapitre ou tout le livre. La génération est toujours volontaire ; les fichiers audio restent enregistrés sur cet appareil.'}</p>
+                    <h2>{isCloudBook ? 'Ton livre prend vie' : 'Crée ton livre audio'}</h2>
+                    <p>{isCloudBook ? `Le PDF est découpé, analysé et enregistré progressivement côté cloud. Les chapitres audio déjà générés sont conservés et streamés sans être recréés à chaque écoute. Traitement : ${selectedBook.cloudProcessingProgress ?? 0}%.` : 'Choisis une voix, puis prépare un chapitre ou tout le livre. Tes fichiers audio restent enregistrés sur cet appareil.'}</p>
                     <div className="lv-stat-grid">
                       <div className="lv-stat">
                         <strong>
@@ -1921,13 +1949,13 @@ export default function AudiobookApp() {
                       </div>
                       <div className="lv-stat">
                         <strong>
-                          {isCloudBook ? (selectedBook.cloudTtsConfigured ? 'Actif' : 'En attente') : (settings.ttsProvider || 'Gemini')}
+                          'À ton rythme'
                         </strong>
-                        <span>{isCloudBook ? 'moteur IA distant' : 'fournisseur IA'}</span>
+                        <span>'Écoute'</span>
                       </div>
                       <div className="lv-stat">
-                        <strong>{isCloudBook ? `${selectedBook.cloudAudioReady ?? 0}` : 'WAV'}</strong>
-                        <span>{isCloudBook ? 'audios cloud prêts' : 'format audio'}</span>
+                        <strong>'Audio'</strong>
+                        <span>{isCloudBook ? 'chapitres à écouter' : 'à télécharger'}</span>
                       </div>
                     </div>
                     <div className="lv-export-actions">
@@ -1939,15 +1967,15 @@ export default function AudiobookApp() {
                       {isCloudBook ? (
                         <>
                           <button className="lv-primary" style={{ width: 'auto' }} onClick={() => selectedBook.cloudJobId && void continueCloudPipeline(selectedBook.cloudJobId, null, selectedBook.id)}>
-                            <RotateCcw size={15} /> Reprendre le traitement cloud
+                            <RotateCcw size={15} /> Reprendre la préparation
                           </button>
-                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre via IA</button>}
+                          {!selectedBook.cloudTtsConfigured && <button className="lv-secondary" disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Créer l'audio du chapitre via IA</button>}
                         </>
                       ) : (
                         <>
-                          <button className="lv-primary" style={{ width: 'auto' }} disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Générer ce chapitre</button>
-                          <button className="lv-secondary" disabled={Boolean(generation?.active)} onClick={() => void generateAll()}><RotateCcw size={15} /> Générer tout le livre</button>
-                          <button className="lv-secondary" disabled={generatedCount !== selectedBook.chapters.length || Boolean(generation?.active)} onClick={() => void exportBook()}><Download size={15} /> Exporter le ZIP</button>
+                          <button className="lv-primary" style={{ width: 'auto' }} disabled={!selectedChapter || Boolean(generation?.active)} onClick={() => void generateCurrent()}><WandSparkles size={15} /> Créer l'audio du chapitre</button>
+                          <button className="lv-secondary" disabled={Boolean(generation?.active)} onClick={() => void generateAll()}><RotateCcw size={15} /> Créer l'audio du livre</button>
+                          <button className="lv-secondary" disabled={generatedCount !== selectedBook.chapters.length || Boolean(generation?.active)} onClick={() => void exportBook()}><Download size={15} /> Télécharger le livre audio</button>
                         </>
                       )}
                     </div>
@@ -2019,7 +2047,7 @@ export default function AudiobookApp() {
                           ) : (
                             <button
                               className="lv-mini-button"
-                              title="Générer ce chapitre"
+                              title="Créer l'audio du chapitre"
                               onClick={() => {
                                 setChapterId(chapter.id);
                                 void generateOne(
@@ -2110,7 +2138,7 @@ export default function AudiobookApp() {
               <label htmlFor="cloud-voice">
                 {(settings.ttsProvider || 'gemini') === 'gemini'
                   ? 'Voix Gemini'
-                  : (settings.ttsProvider === 'deepinfra' ? 'Voix Kokoro · DeepInfra' : 'Voix Cloud')}
+                  : (settings.ttsProvider === 'deepinfra' ? 'Voix de lecture' : 'Voix Cloud')}
               </label>
               <details style={{ position: 'relative', width: '100%' }}>
                 <summary
@@ -2193,12 +2221,12 @@ export default function AudiobookApp() {
               <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
                 {(settings.ttsProvider || 'gemini') === 'gemini'
                   ? 'Choisis parmi les 30 voix studio Gemini, les voix de la bibliothèque étendue, ou colle directement un ID voice_… / voicekey_….'
-                  : 'Voix utilisée lors de la génération audio avec le fournisseur sélectionné.'}
+                  : 'Cette voix racontera les chapitres de ton livre.'}
               </p>
             </div>
 
             <div className="lv-field">
-              <label htmlFor="ocr-lang">Langue OCR</label>
+              <label htmlFor="ocr-lang">Langue du document</label>
               <select
                 id="ocr-lang"
                 className="lv-select"
@@ -2228,13 +2256,15 @@ export default function AudiobookApp() {
                   }
                 />
                 <span>
-                  Activer automatiquement l’OCR local lorsque PDF.js ne trouve
-                  presque aucun texte sur une page.
+                  Activer automatiquement l’Documents numérisés lorsque PDF.js ne trouve
+                  pas de texte lisible.
                 </span>
               </label>
             </div>
+            <details className="lv-advanced-settings">
+              <summary>Options avancées</summary>
             <div className="lv-field">
-              <label htmlFor="tts-provider">Fournisseur IA (clé côté Netlify ou facultativement ici)</label>
+              <label htmlFor="tts-provider">Service de lecture</label>
               <select
                 id="tts-provider"
                 className="lv-select"
@@ -2246,14 +2276,14 @@ export default function AudiobookApp() {
                   setKeyTestError(null);
                 }}
               >
-                <option value="deepinfra">Kokoro · DeepInfra (voix IA cloud)</option>
+                <option value="deepinfra">Voix standard</option>
               </select>
             </div>
 
             <div className="lv-field">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <label htmlFor="provider-key">
-                  {(settings.ttsProvider || 'gemini') === 'aws-polly' ? 'AWS Access Key ID' : 'Clé API'}
+                  'Code de connexion (facultatif)'
                 </label>
                 {settings.apiKey?.trim() ? (
                   <span style={{ fontSize: '11px', color: '#4ade80', display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
@@ -2265,7 +2295,7 @@ export default function AudiobookApp() {
                 id="provider-key"
                 type="password"
                 className="lv-input"
-                placeholder={(settings.ttsProvider || 'gemini') === 'deepinfra' ? 'Clé DeepInfra' : (settings.ttsProvider || 'gemini') === 'aws-polly' ? 'AKIA...' : 'AIzaSy...'}
+                placeholder="Laisser vide si déjà connecté"
                 value={settings.apiKey || ''}
                 onChange={event => {
                   setSettings(current => ({ ...current, apiKey: event.target.value.trim() }));
@@ -2304,18 +2334,19 @@ export default function AudiobookApp() {
 
               {keyTestStatus === 'valid' && (
                 <p style={{ fontSize: '0.8rem', color: '#4ade80', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <CheckCircle2 size={13} /> Connexion API validée.
+                  <CheckCircle2 size={13} /> Connexion vérifiée.
                 </p>
               )}
               {keyTestStatus === 'invalid' && (
                 <p style={{ fontSize: '0.8rem', color: '#f87171', marginTop: 4 }}>
-                  ✕ {keyTestError || 'Identifiants API invalides.'}
+                  ✕ {keyTestError || 'Connexion impossible.'}
                 </p>
               )}
               <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 4 }}>
-                Recommandé : configure la clé dans Netlify → Project configuration → Environment variables (scope Functions). Le champ ci-dessus est facultatif ; aucun secret du serveur n’est envoyé au navigateur.
+                Cette option est réservée à la configuration avancée du service.
               </p>
             </div>
+            </details>
             <div className="lv-modal-actions">
               <button
                 className="lv-primary"
