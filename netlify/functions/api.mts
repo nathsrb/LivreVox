@@ -167,7 +167,7 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
     const primaryModel = env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017';
     // Keep DeepSeek V4.1, but allow a second endpoint of the same model family
     // when the primary responds with a transient 5xx or exhausted generation.
-    const alternateModel = 'deepseek-ai/DeepSeek-V4.1-Flash';
+    const alternateModel = primaryModel; // Retry the verified deployed model, not an unverified model alias.
     const deadline = Date.now() + 23500;
     let lastError = 'Le service de lecture est temporairement indisponible.';
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -183,7 +183,7 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.2,
             reasoning_effort: 'none',
-            max_tokens: Math.max(tokenLimit, attempt ? 2300 : 1800),
+            max_tokens: tokenLimit,
             stream: false,
           }),
           // Always finish before the Netlify ~30-second gateway limit.
@@ -448,7 +448,7 @@ export default async function handler(request: Request): Promise<Response> {
     if (!chapterText.trim() && !summaryParts.length) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-    const summaryMode = ['notes', 'overview', 'actions'].includes(body.summaryMode)
+    const summaryMode = ['notes', 'overview', 'actions', 'essentials', 'understanding', 'takeaways', 'application'].includes(body.summaryMode)
       ? String(body.summaryMode) : 'final';
       // Short, factual intermediate notes keep long chapters affordable and
       // prevent expensive full-length summaries at every merge level.
@@ -497,7 +497,14 @@ CHAPITRE : ${chapterTitle}
 TEXTE ET NOTES DE LECTURE :
 ${source}`;
 
-      const prompt = summaryMode === 'overview' ? overviewPrompt
+      // Four independent, small completions replace two long, timeout-prone finals.
+      const sectionPrompts: Record<string, string> = {
+        essentials: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nTitre exact : ### L'essentiel en quelques lignes\nRésume le but central et 3 à 5 idées majeures en 70 à 110 mots maximum. Aucun développement détaillé." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        understanding: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nTitre exact : ### Comprendre le chapitre\nExplique le raisonnement, les concepts, leurs relations causales et 2 exemples distincts en 140 à 210 mots maximum. Sans introduction ni conclusion." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        takeaways: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nPour un chapitre de non-fiction, titre exact : ### Ce qu'il faut retenir ; rédige 4 à 6 points précis en 90 à 150 mots.\nPour un chapitre de fiction, titre exact : ### Les personnages et leur stratégie ; expose les objectifs, décisions et obstacles réellement présents (90 à 150 mots). Choisis une seule structure adaptée au texte." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+        application: "Rédige une seule section courte en français, fondée exclusivement sur les notes fournies.\nN'invente rien. Évite les répétitions et les explications générales. Ne mentionne pas les outils techniques.\nNe donne aucun titre supplémentaire et termine par une phrase complète.\nRespecte exactement le titre demandé et la longueur.\nPour un chapitre de non-fiction, titre exact : ### Passer à la pratique ; liste 4 à 8 étapes, méthodes ou exercices explicites. Pour chaque point, donne quoi faire, comment et dans quel but, si les notes le permettent. Marque clairement « Piste d'application » toute déduction. 150 à 230 mots maximum.\nPour un chapitre de fiction, titre exact : ### Les tournants de l'histoire ; rapporte seulement les événements, décisions et conséquences du chapitre (150 à 200 mots). Choisis une seule structure adaptée au texte." + '\nLIVRE : ' + bookTitle + '\nCHAPITRE : ' + chapterTitle + '\nNOTES FIDÈLES AU CHAPITRE :\n' + source,
+      };
+      const prompt = sectionPrompts[summaryMode] || (summaryMode === 'overview' ? overviewPrompt
         : summaryMode === 'actions' ? actionsPrompt
         : summaryMode === 'notes' ? compactPrompt
         : `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
@@ -537,9 +544,13 @@ LIVRE : ${bookTitle || 'Livre'}
 CHAPITRE : ${chapterTitle || 'Chapitre'}
 ${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
 SOURCE À ANALYSER :
-${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`;
+${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`);
 
-      const tokenLimit = summaryMode === 'notes' ? 2200
+      const tokenLimit = summaryMode === 'essentials' ? 550
+        : summaryMode === 'understanding' ? 1100
+        : summaryMode === 'takeaways' ? 750
+        : summaryMode === 'application' ? 1200
+        : summaryMode === 'notes' ? 2200
         : summaryMode === 'overview' ? 2600
         : summaryMode === 'actions' ? 3400 : 3500;
       const summary = await generateTextWithProvider(prompt, credentials, tokenLimit);
