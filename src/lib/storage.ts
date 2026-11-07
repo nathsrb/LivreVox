@@ -211,10 +211,30 @@ export async function clearSpeechSegments(bookId: string, chapterId: string): Pr
 /** Reuse the existing segment store. No database version upgrade is needed
  * while an older preview is still generating audio on the same device. */
 export async function getSummarySegments(bookId: string, chapterId: string): Promise<SavedSummarySegment[]> {
-  const segments = await getSpeechSegments(bookId, chapterId);
-  return Promise.all(segments
-    .filter(item => item.voiceId.startsWith('summary:'))
-    .map(async item => ({
+  const db = await openDb();
+  try {
+    // IMPORTANT: A long audiobook can have dozens of large WAV Blobs. Calling
+    // getSpeechSegments() here loads all of them into memory just to read the
+    // few small text summaries, which can crash the browser on chapter 8.
+    // The key prefix identifies the saved summary stages without touching audio.
+    const tx = db.transaction(SPEECH_SEGMENTS, 'readonly');
+    const store = tx.objectStore(SPEECH_SEGMENTS);
+    const prefix = bookId + ':' + chapterId + ':';
+    const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
+    const segments = await new Promise<SavedSpeechSegment[]>((resolve, reject) => {
+      const summaries: SavedSpeechSegment[] = [];
+      const cursor = store.openCursor(range);
+      cursor.onsuccess = () => {
+        const item = cursor.result;
+        if (!item) return resolve(summaries);
+        const value = item.value as SavedSpeechSegment;
+        if (value.bookId === bookId && value.chapterId === chapterId &&
+            value.voiceId?.startsWith('summary:')) summaries.push(value);
+        item.continue();
+      };
+      cursor.onerror = () => reject(cursor.error ?? new Error('Impossible de reprendre les notes enregistrées.'));
+    });
+    return await Promise.all(segments.map(async item => ({
       id: item.id,
       bookId: item.bookId,
       chapterId: item.chapterId,
@@ -223,6 +243,9 @@ export async function getSummarySegments(bookId: string, chapterId: string): Pro
       textHash: item.textHash,
       text: await item.blob.text(),
     })));
+  } finally {
+    db.close();
+  }
 }
 
 export async function saveSummarySegment(segment: SavedSummarySegment): Promise<void> {
