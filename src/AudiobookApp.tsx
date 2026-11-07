@@ -2024,9 +2024,6 @@ export default function AudiobookApp() {
                       </p>
                     </div>
                     <div className="lv-summary-actions">
-                      {selectedChapter.summaryProvisional && (
-                        <p className="lv-summary-note">Fiche provisoire : certains passages restent à regrouper. Tu peux relancer « Actualiser la fiche ».</p>
-                      )}
                       {selectedChapter.summary && (
                         <button className="lv-secondary" title="Copier la fiche" onClick={() => void copyChapterSummary(selectedChapter.summary!)}>
                           <FileText size={14} /> Copier la fiche
@@ -2050,7 +2047,7 @@ export default function AudiobookApp() {
                       >
                         {summaryLoading ? (
                           <>
-                            <RefreshCw size={14} className="animate-spin" /> {summaryProgress || 'Préparation de la fiche…'}
+                            <RefreshCw size={14} className="animate-spin" /> Préparation en cours…
                           </>
                         ) : selectedChapter.summary ? (
                           <>
@@ -2063,6 +2060,12 @@ export default function AudiobookApp() {
                         )}
                       </button>
                     </div>
+                    {summaryLoading && summaryProgress && (
+                      <p className="lv-summary-note" role="status">{summaryProgress}</p>
+                    )}
+                    {selectedChapter.summaryProvisional && !summaryLoading && (
+                      <p className="lv-summary-note">Fiche provisoire : les passages ont été analysés, mais certains restent à regrouper. Utilise « Actualiser la fiche » pour terminer.</p>
+                    )}
                   </div>
 
                   {/* Sélecteur rapide de chapitre pour le résumé */}
