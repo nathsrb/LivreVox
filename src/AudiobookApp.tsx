@@ -74,7 +74,6 @@ import {
 import {
   CLOUD_VOICES,
   getGeminiVoices,
-  isRemoteTtsAvailable,
   makeBookZip,
   synthesizeChapter,
   type GeminiVoiceOption,
