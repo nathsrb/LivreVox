@@ -169,7 +169,10 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
         model: env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
-        max_tokens: 1200,
+        // Summaries need direct output, not the model's default lengthy reasoning.
+        // This prevents reasoning tokens from consuming the output budget and time.
+        reasoning_effort: 'none',
+        max_tokens: 1800,
         stream: false,
       }),
       signal: AbortSignal.timeout(26000),
