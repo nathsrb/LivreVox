@@ -632,7 +632,7 @@ export default function AudiobookApp() {
     setImportProgress(null);
     if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
     else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
-    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast('Texte prêt. L'écoute n'est pas disponible pour le moment.');
+    else if (status.status === 'text_ready' && !status.ttsConfigured) showToast("Texte prêt. L'écoute n'est pas disponible pour le moment.");
   }
 
   async function importLocalFile(file: File): Promise<void> {
