@@ -177,7 +177,8 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
         max_tokens: 1800,
         stream: false,
       }),
-      signal: AbortSignal.timeout(26000),
+      // Respond before Netlify's observed ~30s gateway timeout so the UI can retry.
+      signal: AbortSignal.timeout(20000),
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
