@@ -83,3 +83,8 @@ jobs:
               raise SystemExit("FAILED: at least one of six 710-char audio passages failed")
           print("PASSED: SIX MEDIUM-LENGTH AUDIO CHUNKS, TWO WORKERS")
           PY
+
+      - name: Install one-off browser storage test dependencies
+        run: npm install --no-save tsx fake-indexeddb
+      - name: Live full chapter audio engine + resume test (preview only)
+        run: npx tsx .github/auralis-preview-audio-smoke.mts
