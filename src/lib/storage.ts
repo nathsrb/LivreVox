@@ -208,6 +208,22 @@ export async function clearSpeechSegments(bookId: string, chapterId: string): Pr
   }
 }
 
+/** Count cached Kokoro audio chunks without reading their potentially huge WAV Blobs. */
+export async function countSavedAudioSegments(bookId: string, chapterId: string): Promise<number> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SPEECH_SEGMENTS, 'readonly');
+    const prefix = bookId + ':' + chapterId + ':deepinfra:';
+    const count = await requestAsPromise(
+      tx.objectStore(SPEECH_SEGMENTS)
+        .count(IDBKeyRange.bound(prefix, prefix + '\uffff'))
+    );
+    return count;
+  } finally {
+    db.close();
+  }
+}
+
 /** Reuse the existing segment store. No database version upgrade is needed
  * while an older preview is still generating audio on the same device. */
 export async function getSummarySegments(bookId: string, chapterId: string): Promise<SavedSummarySegment[]> {
