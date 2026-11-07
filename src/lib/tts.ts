@@ -488,13 +488,18 @@ export async function makeBookZip(
   _title: string,
   items: Array<{ index: number; title: string; blob: Blob; parts?: Blob[] }>
 ): Promise<Blob> {
-  const chunks: Uint8Array[] = [];
+  const chunks: BlobPart[] = [];
   let complete!: () => void;
   let fail!: (reason: Error) => void;
   const finished = new Promise<void>((resolve, reject) => { complete = resolve; fail = reject; });
   const zip = new Zip((error, data, final) => {
     if (error) { fail(error); return; }
-    if (data.length) chunks.push(data);
+    if (data.length) {
+      // Keep browser BlobPart typing valid without retaining a pooled backing buffer.
+      const copy = new ArrayBuffer(data.byteLength);
+      new Uint8Array(copy).set(data);
+      chunks.push(copy);
+    }
     if (final) complete();
   });
   try {
