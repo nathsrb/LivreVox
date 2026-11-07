@@ -1205,12 +1205,35 @@ export default function AudiobookApp() {
           index,
           title: chapter.title,
           blob: map[chapter.id].blob,
+          parts: map[chapter.id].parts,
         }))
       );
       saveAs(zip, `${sanitizeFileName(selectedBook.title)} - Livre audio.zip`);
       showToast('Ton livre audio est téléchargé.');
+    } catch {
+      showToast('Impossible de préparer le téléchargement. Vérifie l’espace disponible et réessaie.', true);
     } finally {
       setGeneration(null);
+    }
+  }
+
+  async function downloadChapter(record: AudioRecord, chapterTitle: string, index: number): Promise<void> {
+    try {
+      const prefix = String(index + 1).padStart(2, '0');
+      const name = prefix + ' - ' + sanitizeFileName(chapterTitle);
+      if (record.parts?.length && record.parts.length > 1) {
+        const archive = await makeBookZip(chapterTitle, [{
+          index,
+          title: chapterTitle,
+          blob: record.blob,
+          parts: record.parts,
+        }]);
+        saveAs(archive, name + ' - Audio.zip');
+      } else {
+        saveAs(record.blob, name + '.wav');
+      }
+    } catch {
+      showToast('Impossible de télécharger cet audio pour le moment.', true);
     }
   }
 
@@ -2072,13 +2095,8 @@ export default function AudiobookApp() {
                             <>
                               <button
                                 className="lv-mini-button"
-                                title="Télécharger le WAV"
-                                onClick={() =>
-                                  saveAs(
-                                    audioMap[chapter.id].blob,
-                                    `${String(index + 1).padStart(2, '0')} - ${sanitizeFileName(chapter.title)}.wav`
-                                  )
-                                }
+                                title={audioMap[chapter.id].parts?.length ? 'Télécharger toutes les parties audio' : 'Télécharger le chapitre'}
+                                onClick={() => void downloadChapter(audioMap[chapter.id], chapter.title, index)}
                               >
                                 <Download size={14} />
                               </button>
