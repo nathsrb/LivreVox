@@ -421,90 +421,44 @@ export default async function handler(request: Request): Promise<Response> {
     if (!chapterText.trim()) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-      const prompt = `Tu es une IA spécialisée dans la compréhension, la synthèse et la mémorisation de livres.
+      const prompt = \`Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
+Lis le texte fourni, identifie si c'est une fiction ou une non-fiction et adapte le contenu.
+Ne parle jamais d'IA, de modèle, d'outil, de traitement ou de procédé technique.
+Écris en français naturel, clair et concret. Ne répète pas la même idée dans plusieurs sections.
 
-Ta mission est d’analyser le chapitre fourni et de produire un résumé extrêmement utile pour une personne qui écoute le livre sous forme de livre audio.
+RÈGLES DE FIABILITÉ
+- Appuie-toi uniquement sur le chapitre fourni. Le contexte des chapitres précédents sert uniquement à comprendre les références.
+- Ne révèle rien des chapitres suivants, ne prédis rien, n'invente ni fait, ni action, ni intention, ni citation.
+- Si un conseil est une déduction plutôt qu'une consigne explicite de l'auteur, indique « Piste d'application ».
+- Si un objectif ou un plan n'est pas explicité dans la fiction, indique-le et décris seulement les indices et choix effectivement observables.
+- N'utilise que les sections suivantes, sans séparateurs ---, sans emojis et sans conclusions redondantes.
+- Adapte la longueur à la densité du chapitre, 350 à 650 mots maximum au total.
 
-L’objectif n’est PAS simplement de raccourcir le texte.
+STRUCTURE COMMUNE :
+### L'essentiel en quelques lignes
+4 à 6 phrases donnant l'idée ou le mouvement central, sans formule creuse.
+### Comprendre le chapitre
+Explication structurée des faits ou des idées, avec leurs causes, exemples importants et conséquences. Ne répète pas l'introduction.
 
-Le résumé doit permettre à l’utilisateur :
-- de comprendre ce qui s’est passé ou ce qui a été expliqué ;
-- de retenir les informations essentielles ;
-- de reprendre facilement son écoute plus tard ;
-- de comprendre le chapitre suivant sans avoir besoin de réécouter celui-ci.
+POUR UNE NON-FICTION (essai, développement personnel, pratique, histoire, sciences, enseignement, documentaire), AJOUTE :
+### Ce qu'il faut retenir
+3 à 5 idées distinctes et précises, avec le sens des concepts utiles, sans répéter le résumé détaillé.
+### Passer à la pratique
+Repère TOUTES les actions, méthodes, exercices, habitudes, stratégies ou décisions réellement proposées dans ce chapitre et qui aident à atteindre son objectif. Présente-les dans un ordre concret et logique, sous forme de liste numérotée, avec « quoi faire », « comment » et « dans quel but » lorsque le texte permet de le préciser. Inclus les conditions, étapes, indicateurs et obstacles si le chapitre en parle. Si aucune méthode n'est donnée, indique « Aucune action précise n'est proposée dans ce chapitre » et ajoute au maximum deux pistes d'application clairement distinguées des conseils de l'auteur.
 
-IMPORTANT — ANTI-SPOILER
+POUR UNE FICTION (roman, nouvelle, récit narratif), AJOUTE :
+### Les personnages et leur stratégie
+Pour chaque personnage important, précise son objectif du moment, son plan ou intention quand il est explicite, les actions et décisions prises, les obstacles rencontrés, leurs conséquences et ce qui reste incertain. Distingue toujours faits, suppositions des personnages et interprétations. S'il n'y a pas de stratégie définie, dis-le.
+### Les tournants de l'histoire
+Décris les événements qui modifient les enjeux, les relations ou la situation. Pas de prédictions ni de spoilers.
 
-Tu dois te baser principalement sur le chapitre fourni.
-Tu peux utiliser le contexte des chapitres précédents uniquement pour comprendre les références, personnages, événements ou concepts déjà introduits.
-Tu ne dois JAMAIS révéler une information provenant d’un chapitre suivant.
-Ne prédis pas la suite de l’histoire.
-Ne transforme pas des indices en certitudes.
-Si une information n’est pas explicitement présente dans le chapitre, ne l’invente pas.
+Garde exactement les titres ### indiqués pour le type de livre retenu. Utilise des listes courtes et lisibles lorsque nécessaire, sans ajouter d'autres rubriques.
 
-ADAPTATION AU TYPE DE LIVRE
-
-Commence par identifier silencieusement le type de contenu :
-- roman / fiction ;
-- biographie ;
-- histoire ;
-- essai ;
-- développement personnel ;
-- business ;
-- philosophie ;
-- sciences ;
-- manuel scolaire ;
-- livre professionnel ;
-- autre contenu documentaire.
-
-Adapte ensuite le résumé au type de livre.
-Pour une fiction, privilégie : événements, personnages, décisions, conflits, révélations, évolution des personnages, causes et conséquences.
-Pour un livre documentaire, privilégie : idées, concepts, arguments, méthodes, exemples importants, chiffres réellement utiles, conclusions, applications pratiques.
-Ne force jamais une catégorie qui n’a pas de sens.
-
-STRUCTURE DE SORTIE STRICTE (utilise exactement ces titres avec ces émojis) :
-
-### ⚡ Le chapitre en 30 secondes
-(Résume le chapitre en 3 à 6 phrases maximum. Va directement à l'information importante sans phrase d'introduction générique.)
-
----
-
-### 📖 Résumé détaillé
-(Produis un résumé clair, fluide et structuré de 150 à 400 mots respectant l'ordre logique ou chronologique.)
-
----
-
-### 🧠 À retenir
-(Sélectionne entre 3 et 7 éléments maximum, courts, précis et faciles à mémoriser sous forme de puces tirets.)
-
----
-
-### 👥 Personnages importants
-(Affiche cette section uniquement si des personnages jouent un rôle significatif : **Nom du personnage** — rôle dans le chapitre, action importante ou évolution notable.)
-
-OU (si le livre n'est pas narratif) :
-
-### 💡 Concepts importants
-(**Nom du concept** — définition ou rôle expliqué simplement en une ou deux phrases.)
-
----
-
-### 🔗 Pourquoi ce chapitre est important
-(Explique en 2 à 4 phrases le rôle de ce chapitre dans l’ensemble du livre, sans spoiler la suite.)
-
----
-
-### 🎯 Si tu ne devais retenir qu’une seule chose
-(Écris UNE seule phrase forte représentant le cœur ou la leçon essentielle du chapitre.)
-
----
-
-DONNÉES FOURNIES :
-TITRE DU LIVRE : ${bookTitle || 'Livre audio'}
-TITRE DU CHAPITRE : ${chapterTitle || 'Chapitre'}
-${previousChaptersContext ? `CONTEXTE DES CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
-CONTENU DU CHAPITRE :
-${chapterText.slice(0, 14000)}`;
+LIVRE : \${bookTitle || 'Livre'}
+CHAPITRE : \${chapterTitle || 'Chapitre'}
+\${previousChaptersContext ? \`CHAPITRES PRÉCÉDENTS :\n\${previousChaptersContext}\n\` : ''}
+TEXTE DU CHAPITRE :
+\${chapterText.slice(0, 14000)}\`;
 
       const summary = await generateTextWithProvider(prompt, credentials);
       return respond({summary,provider});
