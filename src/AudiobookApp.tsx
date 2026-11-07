@@ -1328,9 +1328,33 @@ export default function AudiobookApp() {
   }
 
   async function ensureVoiceReady(): Promise<boolean> {
-    if (await isRemoteTtsAvailable(false, settings.apiKey)) return true;
-    showToast('Le service de lecture est momentanément indisponible. Réessaie dans un instant.', true);
-    return false;
+    // /api/health reports credentials/configuration only, not that Kokoro can
+    // actually generate speech. A 33k-word chapter must not launch hundreds of
+    // requests until a tiny real synthesis has passed.
+    try {
+      const res = await fetch('/api/validate-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+          'x-tts-provider': 'deepinfra',
+        },
+        body: JSON.stringify({ provider: 'deepinfra' }),
+      });
+      const result = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      if (res.ok && result.ok === true) return true;
+      if (res.status === 429 || res.status >= 500) {
+        showToast('Kokoro ne répond pas actuellement (HTTP ' + res.status +
+          '). La génération n’a pas été lancée pour éviter des centaines de tentatives inutiles. Tes passages sauvegardés sont conservés.', true);
+      } else {
+        showToast(result.error || 'Impossible de valider la connexion au service vocal.', true);
+      }
+      return false;
+    } catch (error) {
+      console.warn('Auralis: speech preflight failed', error);
+      showToast('Kokoro est inaccessible. La génération n’a pas démarré et tes passages existants sont conservés.', true);
+      return false;
+    }
   }
 
   async function generateOne(
