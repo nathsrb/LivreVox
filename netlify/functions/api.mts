@@ -421,7 +421,7 @@ export default async function handler(request: Request): Promise<Response> {
     if (!chapterText.trim()) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-      const prompt = \`Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
+      const prompt = `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
 Lis le texte fourni, identifie si c'est une fiction ou une non-fiction et adapte le contenu.
 Ne parle jamais d'IA, de modèle, d'outil, de traitement ou de procédé technique.
 Écris en français naturel, clair et concret. Ne répète pas la même idée dans plusieurs sections.
@@ -454,11 +454,11 @@ Décris les événements qui modifient les enjeux, les relations ou la situation
 
 Garde exactement les titres ### indiqués pour le type de livre retenu. Utilise des listes courtes et lisibles lorsque nécessaire, sans ajouter d'autres rubriques.
 
-LIVRE : \${bookTitle || 'Livre'}
-CHAPITRE : \${chapterTitle || 'Chapitre'}
-\${previousChaptersContext ? \`CHAPITRES PRÉCÉDENTS :\n\${previousChaptersContext}\n\` : ''}
+LIVRE : ${bookTitle || 'Livre'}
+CHAPITRE : ${chapterTitle || 'Chapitre'}
+${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
 TEXTE DU CHAPITRE :
-\${chapterText.slice(0, 14000)}\`;
+${chapterText.slice(0, 14000)}`;
 
       const summary = await generateTextWithProvider(prompt, credentials);
       return respond({summary,provider});
