@@ -840,7 +840,7 @@ export default function AudiobookApp() {
         .map((item, index) => 'Chapitre ' + (index + 1) + ' : ' + item.title).join(', ');
 
       const requestSummary = async (
-        text: string, parts?: string[], mode: 'notes' | 'final' = 'notes'
+        text: string, parts?: string[], mode: 'notes' | 'overview' | 'actions' = 'notes'
       ): Promise<string> => {
         const body = JSON.stringify({
           chapterText: text,
@@ -936,10 +936,10 @@ export default function AudiobookApp() {
 
       let summaryText: string;
       let isProvisional = false;
-      if (segments.length === 1) {
-        setSummaryProgress('Rédaction de la fiche…');
-        summaryText = await getOrCreate(99, 0, source, () => requestSummary(source, undefined, 'final'));
-      } else {
+      let finalText = source;
+      let finalParts: string[] | undefined;
+
+      if (segments.length > 1) {
         let notes: string[] = [];
         for (let index = 0; index < segments.length; index++) {
           setSummaryProgress('Analyse du passage ' + (index + 1) + '/' + segments.length +
@@ -963,20 +963,42 @@ export default function AudiobookApp() {
           notes = combined;
           stage++;
         }
-        setSummaryProgress('Finalisation de la fiche…');
-        try {
-          summaryText = await getOrCreate(99, 0, notes.join('\n\n'),
-            () => requestSummary('', notes, 'final'));
-        } catch {
-          // Even when the final merge times out, preserve a useful, honestly
-          // labeled overview rather than discard all successfully read passages.
-          isProvisional = true;
-          summaryText = '### Fiche provisoire\n' +
-            'Les passages du chapitre ont été analysés, mais leur mise en forme finale n’a pas abouti. ' +
-            'Voici les points relevés dans l’ordre. Relance « Actualiser la fiche » pour réessayer.\n\n' +
-            notes.join('\n\n');
-        }
+        finalText = '';
+        finalParts = notes;
       }
+
+      // Two independent budgets: the explanation cannot consume the room needed
+      // by the practical steps or character strategy.
+      const finalSignature = (finalParts || [finalText]).join('\n\n');
+      setSummaryProgress('Rédaction de la synthèse…');
+      const overview = await getOrCreate(100, 0, 'overview-v2:' + finalSignature,
+        () => requestSummary(finalText, finalParts, 'overview'));
+      if (!/###\s*L['’]essentiel/i.test(overview) || !/###\s*Comprendre/i.test(overview)) {
+        throw new Error('La synthèse est incomplète. Relance la préparation de la fiche.');
+      }
+
+      setSummaryProgress('Préparation des actions et des points clés…');
+      try {
+        const actions = await getOrCreate(101, 0, 'actions-v2:' + finalSignature,
+          () => requestSummary(finalText, finalParts, 'actions'));
+        const hasPracticalSections = /###\s*Passer à la pratique/i.test(actions)
+          && /###\s*Ce qu['’]il faut retenir/i.test(actions);
+        const hasFictionSections = /###\s*Les personnages et leur stratégie/i.test(actions)
+          && /###\s*Les tournants de l['’]histoire/i.test(actions);
+        if (!hasPracticalSections && !hasFictionSections) {
+          throw new Error('Les étapes importantes ne sont pas toutes présentes.');
+        }
+        summaryText = overview + '\n\n' + actions;
+      } catch (error) {
+        // Persist a clearly identified partial result rather than saving it as
+        // finished, and keep the cached overview for a later retry.
+        isProvisional = true;
+        summaryText = overview + '\n\n### À compléter\n' +
+          'La synthèse est prête, mais les actions ou les décisions des personnages ' +
+          'n’ont pas pu être finalisées. Utilise « Actualiser la fiche » pour les compléter.';
+        console.warn('Auralis: final action section still pending', error);
+      }
+
       const updatedBook: Book = {
         ...book, updatedAt: Date.now(),
         chapters: book.chapters.map(item => item.id === chapter.id
