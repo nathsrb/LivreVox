@@ -282,7 +282,7 @@ async function synthesizeRemoteChunk(
       );
     }
     throw new Error(
-      payload.error || `La synthèse vocale distante a échoué (${response.status}).`
+      'Audio (' + response.status + ') : ' + (payload.error || 'Le passage n’a pas pu être préparé.')
     );
   }
   return base64ToBlob(payload.audio, payload.mimeType || 'audio/wav');
@@ -378,7 +378,7 @@ export async function synthesizeChapter(
   customApiKey?: string,
   cloudVoice?: string,
   cacheContext?: { bookId: string; chapterId: string }
-): Promise<{ blob: Blob; duration: number; engineVoiceId: string }> {
+): Promise<{ blob: Blob; duration: number; engineVoiceId: string; parts?: Blob[]; partDurations?: number[] }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
   const provider = stored.provider;
@@ -387,7 +387,9 @@ export async function synthesizeChapter(
   if (!text.trim()) throw new Error('Ce chapitre ne contient pas de texte à lire.');
   if (shouldCancel()) throw new Error('Génération interrompue.');
   // Small independent requests stay below Netlify's observed 30s gateway limit.
-  const chunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
+  // Preserve progress saved by previous previews that used 1 200-character chunks.
+  const recentChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
+  const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
     (cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'));
   const storedSegments = cacheContext
@@ -397,6 +399,10 @@ export async function synthesizeChapter(
     storedSegments.filter(segment => segment.voiceId === engineVoiceId)
       .map(segment => [segment.index, segment])
   );
+  const resumeLegacy = legacyChunks.some((chunk, index) =>
+    availableSegments.get(index)?.textHash === textFingerprint(chunk)
+  );
+  const chunks = resumeLegacy ? legacyChunks : recentChunks;
   const generated: Blob[] = [];
   let reused = 0;
   for (let index = 0; index < chunks.length; index++) {
@@ -436,10 +442,40 @@ export async function synthesizeChapter(
     generated.push(audio);
   }
   onProgress(96, 'Assemblage du chapitre · les passages sont conservés');
+  // A very long chapter is kept as sequential WAV parts. No single RIFF WAV
+  // ever needs to exceed its 32-bit size limit or occupy one enormous buffer.
   if (generated.every(blob => blob.type.includes('wav'))) {
-    const merged = await mergeWavBlobs(generated);
+    const maxPartBytes = 80 * 1024 * 1024;
+    const groups: Blob[][] = [];
+    let pending: Blob[] = [];
+    let pendingBytes = 0;
+    for (const blob of generated) {
+      if (pending.length && pendingBytes + blob.size > maxPartBytes) {
+        groups.push(pending);
+        pending = [];
+        pendingBytes = 0;
+      }
+      pending.push(blob);
+      pendingBytes += blob.size;
+    }
+    if (pending.length) groups.push(pending);
+    const rendered: Array<{ blob: Blob; duration: number }> = [];
+    for (let index = 0; index < groups.length; index++) {
+      if (shouldCancel()) throw new Error('Génération interrompue. Les passages enregistrés sont conservés.');
+      onProgress(96 + Math.round((index / groups.length) * 3), 'Assemblage audio · partie ' + (index + 1) + '/' + groups.length);
+      rendered.push(await mergeWavBlobs(groups[index]));
+    }
+    const duration = rendered.reduce((total, part) => total + part.duration, 0);
     onProgress(100, 'Chapitre audio prêt');
-    return { ...merged, engineVoiceId };
+    return {
+      blob: rendered[0].blob,
+      duration,
+      engineVoiceId,
+      ...(rendered.length > 1 ? {
+        parts: rendered.map(part => part.blob),
+        partDurations: rendered.map(part => part.duration),
+      } : {}),
+    };
   }
   const combinedBlob = new Blob(generated, { type: generated[0]?.type || 'audio/mpeg' });
   const duration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
