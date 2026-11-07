@@ -74,6 +74,8 @@ import {
 import {
   CLOUD_VOICES,
   getGeminiVoices,
+  setPreferredSpeechRoute,
+  type SpeechRoute,
   makeBookZip,
   synthesizeChapter,
   type GeminiVoiceOption,
@@ -257,6 +259,7 @@ export default function AudiobookApp() {
   const fileRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const cancelGeneration = useRef(false);
+  const lastVerifiedSpeech = useRef<{ expiresAt: number; route: SpeechRoute } | null>(null);
   const passwordResolver = useRef<((password: string | null) => void) | null>(null);
 
   const [audioPlaying, setAudioPlaying] = useState(false);
@@ -1327,33 +1330,46 @@ export default function AudiobookApp() {
   }
 
   async function ensureVoiceReady(): Promise<boolean> {
-    // /api/health reports credentials/configuration only, not that Kokoro can
-    // actually generate speech. A 33k-word chapter must not launch hundreds of
-    // requests until a tiny real synthesis has passed.
-    try {
-      const res = await fetch('/api/validate-key', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
-          'x-tts-provider': 'deepinfra',
-        },
-        body: JSON.stringify({ provider: 'deepinfra' }),
-      });
-      const result = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
-      if (res.ok && result.ok === true) return true;
-      if (res.status === 429 || res.status >= 500) {
-        showToast('Kokoro ne répond pas actuellement (HTTP ' + res.status +
-          '). La génération n’a pas été lancée pour éviter des centaines de tentatives inutiles. Tes passages sauvegardés sont conservés.', true);
-      } else {
-        showToast(result.error || 'Impossible de valider la connexion au service vocal.', true);
-      }
-      return false;
-    } catch (error) {
-      console.warn('Auralis: speech preflight failed', error);
-      showToast('Kokoro est inaccessible. La génération n’a pas démarré et tes passages existants sont conservés.', true);
-      return false;
+    // Netlify /health only proves that a key exists, not that speech works.
+    // Confirm that Kokoro actually returns audio before a large chapter.
+    if (lastVerifiedSpeech.current?.expiresAt && lastVerifiedSpeech.current.expiresAt > Date.now()) {
+      setPreferredSpeechRoute(lastVerifiedSpeech.current.route);
+      return true;
     }
+    const routes: SpeechRoute[] = ['openai', 'inference'];
+    const failures: string[] = [];
+    for (const route of routes) {
+      try {
+        const res = await fetch('/api/validate-key', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+            'x-tts-provider': 'deepinfra',
+          },
+          body: JSON.stringify({ provider: 'deepinfra', ttsRoute: route }),
+          signal: AbortSignal.timeout(27000),
+        });
+        const payload = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+        if (res.ok && payload.ok === true) {
+          setPreferredSpeechRoute(route);
+          lastVerifiedSpeech.current = { route, expiresAt: Date.now() + 10 * 60_000 };
+          return true;
+        }
+        failures.push(route + ' (' + res.status + ')');
+        if (res.status === 401 || res.status === 403) {
+          showToast('La clé DeepInfra n’est pas acceptée par le service vocal. Vérifie la configuration Netlify.', true);
+          return false;
+        }
+      } catch (error) {
+        failures.push(route + ' (connexion interrompue)');
+        console.warn('Auralis: Kokoro service check interrupted', route, error);
+      }
+    }
+    showToast('Le service vocal DeepInfra ne produit aucun audio pour le moment : ' +
+      failures.join(' ; ') +
+      '. Aucun long chapitre n’a été lancé. Les passages déjà enregistrés sont conservés.', true);
+    return false;
   }
 
   async function generateOne(
