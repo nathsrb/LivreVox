@@ -358,8 +358,14 @@ async function synthesizeResilientChunk(
       const slow = /\b(502|503|504|520|522|524)\b|timeout|aborted|timed.out/i.test(reason);
       const transient = slow || rateLimit || /network|failed to fetch|fetch failed|temporarily|connection/i.test(reason);
       lastError = error;
-      if (blocked || dailyQuota || !transient) throw error;
-      if (slow && text.length > 420) {
+      // Only permanent client errors should abort immediately. A 400/404
+      // restricted to one TTS API surface may succeed on the other.
+      if (dailyQuota || !transient && !/\b(400|404)\b/.test(reason)) throw error;
+      if (blocked && !/\b(400|404)\b/.test(reason)) throw error;
+      // Try the alternative DeepInfra route before splitting otherwise-valid
+      // text. A 504 on /openai/audio/speech alone is not proof that the
+      // inference endpoint cannot serve this chunk.
+      if (slow && text.length > 420 && attempt >= 1) {
         canSplit = true;
         break;
       }
