@@ -96,6 +96,8 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
       speed: 1,
       stream: false,
     }),
+    // Return a recoverable timeout BEFORE Netlify's observed 30s gateway limit.
+    signal: AbortSignal.timeout(18000),
   });
   if (!response.ok) throw new Error(`DeepInfra Kokoro ${response.status}: ${await response.text()}`);
   const payload = await response.json() as { audio?: string };
@@ -281,14 +283,14 @@ async function synthesizeSpeech(
   const outputs: Array<{ buffer: Buffer; mimeType: string; extension: string }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < (credentials.provider === 'deepinfra' ? 1 : 3); attempt += 1) {
       try {
         outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials));
         lastError = undefined;
         break;
       } catch (error) {
         lastError = error;
-        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 900 * (attempt + 1)));
+        if (credentials.provider !== 'deepinfra' && attempt < 2) await new Promise(resolve => setTimeout(resolve, 900 * (attempt + 1)));
       }
     }
     if (lastError) throw lastError;
@@ -321,8 +323,10 @@ function classifyError(error: unknown) {
   const quota = /429|RESOURCE_EXHAUSTED|quota|throttl/i.test(message);
   const authentication = /401|403|API_KEY|permission|unauthorized|forbidden/i.test(message);
   const invalid = /400|INVALID_ARGUMENT|voice|model|malformed/i.test(message);
-  const timeout = /timeout|aborted|délai/i.test(message);
-  return { error: message, status: quota ? 429 : authentication ? 401 : invalid ? 400 : timeout ? 504 : 502 };
+  const timeout = (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) ||
+    /timeout|aborted|délai/i.test(message);
+  const publicMessage = timeout ? 'Ce passage prend trop de temps. Auralis va le découper et réessayer.' : message;
+  return { error: publicMessage, status: quota ? 429 : authentication ? 401 : invalid ? 400 : timeout ? 504 : 502 };
 }
 
 export default async function handler(request: Request): Promise<Response> {
