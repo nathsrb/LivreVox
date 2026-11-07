@@ -840,7 +840,7 @@ export default function AudiobookApp() {
         .map((item, index) => 'Chapitre ' + (index + 1) + ' : ' + item.title).join(', ');
 
       const requestSummary = async (
-        text: string, parts?: string[], mode: 'notes' | 'overview' | 'actions' = 'notes'
+        text: string, parts?: string[], mode: 'notes' | 'overview' | 'actions' | 'essentials' | 'understanding' | 'takeaways' | 'application' = 'notes'
       ): Promise<string> => {
         const body = JSON.stringify({
           chapterText: text,
@@ -967,50 +967,71 @@ export default function AudiobookApp() {
         finalParts = notes;
       }
 
-      // Two independent budgets: the explanation cannot consume the room needed
-      // by the practical steps or character strategy.
+      // Finalise in small, independently cached sections. A timeout in one
+      // section must not destroy the other completed parts of the reading sheet.
       const finalSignature = (finalParts || [finalText]).join('\n\n');
-      setSummaryProgress('Rédaction de la synthèse…');
-      const overview = await getOrCreate(100, 0, 'overview-v2:' + finalSignature,
-        () => requestSummary(finalText, finalParts, 'overview'));
-      if (!/###\s*L['’]essentiel/i.test(overview) || !/###\s*Comprendre/i.test(overview)) {
-        throw new Error('La synthèse est incomplète. Relance la préparation de la fiche.');
-      }
-
-      setSummaryProgress('Préparation des actions et des points clés…');
-      try {
-        const actions = await getOrCreate(101, 0, 'actions-v2:' + finalSignature,
-          () => requestSummary(finalText, finalParts, 'actions'));
-        const hasPracticalSections = /###\s*Passer à la pratique/i.test(actions)
-          && /###\s*Ce qu['’]il faut retenir/i.test(actions);
-        const hasFictionSections = /###\s*Les personnages et leur stratégie/i.test(actions)
-          && /###\s*Les tournants de l['’]histoire/i.test(actions);
-        if (!hasPracticalSections && !hasFictionSections) {
-          throw new Error('Les étapes importantes ne sont pas toutes présentes.');
-        }
-        summaryText = overview + '\n\n' + actions;
-      } catch (error) {
-        // Persist a clearly identified partial result rather than saving it as
-        // finished, and keep the cached overview for a later retry.
-        isProvisional = true;
-        summaryText = overview + '\n\n### À compléter\n' +
-          'La synthèse est prête, mais les actions ou les décisions des personnages ' +
-          'n’ont pas pu être finalisées. Utilise « Actualiser la fiche » pour les compléter.';
-        console.warn('Auralis: final action section still pending', error);
-      }
-
-      const updatedBook: Book = {
-        ...book, updatedAt: Date.now(),
-        chapters: book.chapters.map(item => item.id === chapter.id
-          ? { ...item, summary: summaryText, summaryProvisional: isProvisional }
-          : item),
+      const sections: Array<{
+        stage: number;
+        mode: 'essentials' | 'understanding' | 'takeaways' | 'application';
+        label: string;
+        heading: RegExp;
+      }> = [
+        { stage: 120, mode: 'essentials', label: "L'essentiel en quelques lignes",
+          heading: /###\s*L['’]essentiel en quelques lignes/i },
+        { stage: 121, mode: 'understanding', label: 'Comprendre le chapitre',
+          heading: /###\s*Comprendre le chapitre/i },
+        { stage: 122, mode: 'takeaways', label: "Ce qu'il faut retenir",
+          heading: /###\s*(Ce qu['’]il faut retenir|Les personnages et leur stratégie)/i },
+        { stage: 123, mode: 'application', label: 'Passer à la pratique',
+          heading: /###\s*(Passer à la pratique|Les tournants de l['’]histoire)/i },
+      ];
+      const completed: string[] = [];
+      let unfinished = 0;
+      const keepDraft = async (provisional: boolean): Promise<void> => {
+        const draft: Book = {
+          ...book, updatedAt: Date.now(),
+          chapters: book.chapters.map(item => item.id === chapter.id
+            ? { ...item, summary: completed.join('\n\n'), summaryProvisional: provisional }
+            : item),
+        };
+        await putBook(draft);
+        setBooks(current => current.map(item => item.id === draft.id ? draft : item));
       };
-      await putBook(updatedBook);
-      setBooks(current => current.map(item => item.id === updatedBook.id ? updatedBook : item));
+
+      for (let index = 0; index < sections.length; index++) {
+        const section = sections[index];
+        setSummaryProgress('Rédaction de la section ' + (index + 1) + '/' + sections.length +
+          ' · les sections déjà rédigées sont enregistrées');
+        try {
+          const text = await getOrCreate(section.stage, 0, 'section-v3:' + section.mode + ':' + finalSignature,
+            async () => {
+              const response = await requestSummary(finalText, finalParts, section.mode);
+              if (!section.heading.test(response) || response.trim().length < 90) {
+                throw new Error('Section incomplète : ' + section.label);
+              }
+              return response;
+            });
+          if (!section.heading.test(text)) throw new Error('Section mal formée : ' + section.label);
+          completed.push(text);
+        } catch (error) {
+          unfinished++;
+          console.warn('Auralis: chapter summary section pending', section.mode, error);
+          completed.push('### ' + section.label + '\n' +
+            '*Cette section n’a pas pu être finalisée. Les passages déjà analysés ' +
+            'sont conservés. Utilise « Actualiser la fiche » pour terminer cette partie.*');
+        }
+        // Persist after EVERY section, so closing the tab cannot erase the
+        // completed parts of the fiche, even if later requests fail.
+        await keepDraft(true);
+      }
+
+      const isProvisional = unfinished > 0;
+      await keepDraft(isProvisional);
       if (!isProvisional) await clearSummarySegments(book.id, chapter.id).catch(() => undefined);
       showToast(isProvisional
-        ? 'Une fiche provisoire est enregistrée. Tu peux la compléter plus tard.'
-        : 'Fiche de lecture prête !');
+        ? (sections.length - unfinished) + '/' + sections.length +
+          ' sections prêtes. Actualise la fiche pour compléter les autres.'
+        : 'Fiche de lecture complète !');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Impossible de préparer cette fiche.', true);
     } finally {
