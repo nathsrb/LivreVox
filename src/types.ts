@@ -38,6 +38,9 @@ export type AudioRecord = {
   chapterId: string;
   voiceId: string;
   blob: Blob;
+  /** Long chapters play as consecutive parts, but still appear as one chapter. */
+  parts?: Blob[];
+  partDurations?: number[];
   duration: number;
   createdAt: number;
 };
