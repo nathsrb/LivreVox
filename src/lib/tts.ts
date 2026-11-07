@@ -340,18 +340,18 @@ async function synthesizeResilientChunk(
       const transient = slow || rateLimit || /network|failed to fetch|fetch failed|temporarily|connection/i.test(reason);
       lastError = error;
       if (blocked || dailyQuota || !transient) throw error;
-      if (slow && text.length > 180) {
+      if (slow && text.length > 420) {
         canSplit = true;
         break;
       }
       if (attempt < 2) {
-        const wait = rateLimit ? (attempt === 0 ? 6000 : 14000) : (attempt === 0 ? 1700 : 4300);
+        const wait = rateLimit ? (attempt === 0 ? 4000 : 9000) : (attempt === 0 ? 1700 : 4300);
         await sleepWithCancel(wait, shouldCancel, onWait);
       }
     }
   }
 
-  if (canSplit && text.length > 180) {
+  if (canSplit && text.length > 420) {
     const middle = Math.floor(text.length / 2);
     const space = text.lastIndexOf(' ', middle);
     const cut = space > text.length / 4 ? space : middle;
@@ -388,7 +388,11 @@ export async function synthesizeChapter(
   if (shouldCancel()) throw new Error('Génération interrompue.');
   // Balance service latency with request count. Cap concurrency at two to
   // avoid flooding the provider or Netlify while halving wall-clock latency.
-  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 720 : 900);
+  // Avoid long Kokoro inference calls that time out behind Netlify's gateway.
+  // Keep recognizing previous 720/480/1200-char divisions so older recorded
+  // passages are never discarded on an existing chapter.
+  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 360 : 900);
+  const previousFastChunks = chunkForSpeech(text, 720);
   const previousChunks = chunkForSpeech(text, 480);
   const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
@@ -404,7 +408,8 @@ export async function synthesizeChapter(
     availableSegments.get(index)?.textHash === textFingerprint(passage));
   // Keep the original division for a chapter already in progress: never throw
   // away successful passages when upgrading from a previous preview.
-  const chunks = hasMatches(previousChunks) ? previousChunks :
+  const chunks = hasMatches(previousFastChunks) ? previousFastChunks :
+    hasMatches(previousChunks) ? previousChunks :
     hasMatches(legacyChunks) ? legacyChunks : fastChunks;
   const generated: Blob[] = new Array(chunks.length);
   let completed = 0;
