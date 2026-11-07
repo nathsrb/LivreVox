@@ -16,3 +16,45 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npm run build
+
+      - name: Live Kokoro audio test (preview only, tiny synthetic text)
+        env:
+          AURALIS_PREVIEW: https://deploy-preview-2--auralis-slnr.netlify.app
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error, time
+          base=os.environ["AURALIS_PREVIEW"].rstrip("/")
+          routes=["openai","inference"]
+          passing=[]
+          for route in routes:
+              body={"text":"Bonjour, je suis une voix française pour Auralis.",
+                    "voice":"ff_siwis","provider":"deepinfra","ttsRoute":route}
+              request=urllib.request.Request(base+"/api/tts",data=json.dumps(body).encode("utf-8"),
+                  headers={"Content-Type":"application/json"},method="POST")
+              started=time.monotonic()
+              try:
+                  with urllib.request.urlopen(request,timeout=45) as response:
+                      status=response.status
+                      mime=response.headers.get("content-type","")
+                      data=response.read()
+                      detail=""
+              except urllib.error.HTTPError as e:
+                  status=e.code
+                  mime=e.headers.get("content-type","")
+                  detail=e.read(500).decode("utf-8",errors="replace")
+                  data=b""
+              except Exception as e:
+                  status=0
+                  mime=""
+                  detail=type(e).__name__
+                  data=b""
+              is_wav=status==200 and data[:4]==b"RIFF" and len(data)>44
+              print(f"KOKORO_ROUTE={route} STATUS={status} WAV={is_wav} BYTES={len(data)} SECONDS={time.monotonic()-started:.1f}")
+              if not is_wav:
+                  print("DETAIL",detail[:250])
+              else:
+                  passing.append(route)
+          if not passing:
+              raise SystemExit("FAILED: neither Kokoro route generated valid audio")
+          print("PASSED: REAL AUDIBLE WAV GENERATED USING",passing)
+          PY
