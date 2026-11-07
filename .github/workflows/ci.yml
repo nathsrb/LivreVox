@@ -57,4 +57,29 @@ jobs:
           if not passing:
               raise SystemExit("FAILED: neither Kokoro route generated valid audio")
           print("PASSED: REAL AUDIBLE WAV GENERATED USING",passing)
+          # A short working sample is not enough: simulate six 700-char
+          # passages with the same two-worker concurrency as the application.
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          phrase=("Le personnage traverse la ville et observe les détails de son histoire. "
+                  "Il comprend progressivement la raison de son voyage et reprend confiance. ")
+          def render_part(i):
+              text=(f"Passage numéro {i}. " + phrase * 8)[:710]
+              body={"text":text,"voice":"ff_siwis","provider":"deepinfra","ttsRoute":passing[0]}
+              req=urllib.request.Request(base+"/api/tts",data=json.dumps(body).encode("utf-8"),
+                  headers={"Content-Type":"application/json"},method="POST")
+              started=time.monotonic()
+              try:
+                  with urllib.request.urlopen(req,timeout=45) as resp:
+                      audio=resp.read()
+                      return i, resp.status, audio[:4]==b"RIFF" and len(audio)>4400, len(audio), round(time.monotonic()-started,1)
+              except urllib.error.HTTPError as error:
+                  return i, error.code, False, 0, round(time.monotonic()-started,1)
+              except Exception:
+                  return i, 0, False, 0, round(time.monotonic()-started,1)
+          with ThreadPoolExecutor(max_workers=2) as pool:
+              outcomes=list(pool.map(render_part, range(1,7)))
+          for result in outcomes: print("LONG_CHUNK_TEST:",result)
+          if not all(item[2] for item in outcomes):
+              raise SystemExit("FAILED: at least one of six 710-char audio passages failed")
+          print("PASSED: SIX MEDIUM-LENGTH AUDIO CHUNKS, TWO WORKERS")
           PY
