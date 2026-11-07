@@ -386,9 +386,10 @@ export async function synthesizeChapter(
   if (!available) throw new Error('La création audio est momentanément indisponible.');
   if (!text.trim()) throw new Error('Ce chapitre ne contient pas de texte à lire.');
   if (shouldCancel()) throw new Error('Génération interrompue.');
-  // Small independent requests stay below Netlify's observed 30s gateway limit.
-  // Preserve progress saved by previous previews that used 1 200-character chunks.
-  const recentChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
+  // Balance service latency with request count. Cap concurrency at two to
+  // avoid flooding the provider or Netlify while halving wall-clock latency.
+  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 720 : 900);
+  const previousChunks = chunkForSpeech(text, 480);
   const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
     (cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'));
@@ -399,48 +400,70 @@ export async function synthesizeChapter(
     storedSegments.filter(segment => segment.voiceId === engineVoiceId)
       .map(segment => [segment.index, segment])
   );
-  const resumeLegacy = legacyChunks.some((chunk, index) =>
-    availableSegments.get(index)?.textHash === textFingerprint(chunk)
-  );
-  const chunks = resumeLegacy ? legacyChunks : recentChunks;
-  const generated: Blob[] = [];
+  const hasMatches = (segments: string[]) => segments.some((passage, index) =>
+    availableSegments.get(index)?.textHash === textFingerprint(passage));
+  // Keep the original division for a chapter already in progress: never throw
+  // away successful passages when upgrading from a previous preview.
+  const chunks = hasMatches(previousChunks) ? previousChunks :
+    hasMatches(legacyChunks) ? legacyChunks : fastChunks;
+  const generated: Blob[] = new Array(chunks.length);
+  let completed = 0;
   let reused = 0;
-  for (let index = 0; index < chunks.length; index++) {
-    if (shouldCancel()) throw new Error('Génération interrompue. Les passages déjà créés sont conservés.');
-    const passage = chunks[index];
-    const signature = textFingerprint(passage);
-    const cached = availableSegments.get(index);
-    const progress = Math.round(5 + (index / Math.max(1, chunks.length)) * 90);
-    if (cached?.textHash === signature && cached.blob?.size > 0 &&
-        (provider !== 'deepinfra' || cached.blob.type.includes('wav'))) {
-      generated.push(cached.blob);
-      reused++;
-      onProgress(progress, 'Reprise du passage ' + (index + 1) + '/' + chunks.length +
-        ' · ' + reused + ' déjà sauvegardés');
-      continue;
-    }
-    onProgress(progress, 'Création de l’audio · passage ' + (index + 1) + '/' + chunks.length);
-    const audio = await synthesizeResilientChunk(
-      passage, activeKey, cloudVoice, shouldCancel,
-      seconds => onProgress(progress, 'Nouvelle tentative dans ' + seconds + ' s · passages conservés')
-    );
-    if (cacheContext) {
+  let failed: unknown = null;
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < chunks.length && !failed) {
+      if (shouldCancel()) throw new Error('Génération interrompue. Les passages déjà créés sont conservés.');
+      const index = cursor++;
+      const passage = chunks[index];
+      const signature = textFingerprint(passage);
+      const cached = availableSegments.get(index);
+      const emitProgress = (label: string) => {
+        const progress = Math.round(5 + (completed / Math.max(1, chunks.length)) * 90);
+        onProgress(progress, label);
+      };
       try {
-        await saveSpeechSegment({
-          id: cacheContext.bookId + ':' + cacheContext.chapterId + ':' + engineVoiceId + ':' + index,
-          bookId: cacheContext.bookId,
-          chapterId: cacheContext.chapterId,
-          voiceId: engineVoiceId,
-          index,
-          textHash: signature,
-          blob: audio,
-        });
-      } catch {
-        throw new Error('Le stockage de cet appareil est insuffisant pour conserver la suite de l’audio.');
+        let audio: Blob;
+        if (cached?.textHash === signature && cached.blob?.size > 0 &&
+            (provider !== 'deepinfra' || cached.blob.type.includes('wav'))) {
+          audio = cached.blob;
+          reused++;
+        } else {
+          emitProgress('Création de l’audio · ' + completed + '/' + chunks.length + ' passages terminés');
+          audio = await synthesizeResilientChunk(
+            passage, activeKey, cloudVoice, shouldCancel,
+            seconds => emitProgress('Nouvelle tentative dans ' + seconds + ' s · passages conservés')
+          );
+          if (cacheContext) {
+            try {
+              await saveSpeechSegment({
+                id: cacheContext.bookId + ':' + cacheContext.chapterId + ':' + engineVoiceId + ':' + index,
+                bookId: cacheContext.bookId,
+                chapterId: cacheContext.chapterId,
+                voiceId: engineVoiceId,
+                index,
+                textHash: signature,
+                blob: audio,
+              });
+            } catch {
+              throw new Error('Le stockage de cet appareil est insuffisant pour conserver la suite de l’audio.');
+            }
+          }
+        }
+        generated[index] = audio;
+        completed++;
+        emitProgress('Audio · ' + completed + '/' + chunks.length + ' passages prêts' +
+          (reused ? ' (' + reused + ' récupérés)' : ''));
+      } catch (error) {
+        failed = error;
+        throw error;
       }
     }
-    generated.push(audio);
-  }
+  };
+  const workers = Array.from({ length: Math.min(2, chunks.length) }, () => worker());
+  const workerResults = await Promise.allSettled(workers);
+  const unsuccessful = workerResults.find(result => result.status === 'rejected');
+  if (unsuccessful?.status === 'rejected') throw unsuccessful.reason;
   onProgress(96, 'Assemblage du chapitre · les passages sont conservés');
   // A very long chapter is kept as sequential WAV parts. No single RIFF WAV
   // ever needs to exceed its 32-bit size limit or occupy one enormous buffer.
