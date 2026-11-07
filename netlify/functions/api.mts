@@ -7,7 +7,10 @@
 import { Buffer } from 'node:buffer';
 import { createHash, createHmac } from 'node:crypto';
 
-const env = (key: string): string => process.env[key]?.trim() || '';
+const env = (key: string): string => {
+  const platformValue = (globalThis as any).Netlify?.env?.get?.(key);
+  return String(platformValue || process.env[key] || '').trim();
+};
 const respond = (body: unknown, status = 200): Response =>
   Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 const header = (request: Request, key: string) => request.headers.get(key)?.trim() || '';
@@ -310,7 +313,7 @@ const voicesFeatured =  [
 
 type Body = Record<string, any>;
 function configured(provider: ProviderName, request: Request, body: Body = {}) {
-  const apiKey = String(body.apiKey || header(request,'x-api-key') || header(request,'x-gemini-api-key') || (
+  const apiKey = String((provider === 'deepinfra' ? env('DEEPINFRA_API_KEY') : '') || body.apiKey || header(request,'x-api-key') || header(request,'x-gemini-api-key') || (
     provider === 'deepinfra' ? env('DEEPINFRA_API_KEY') :
     provider === 'aws-polly' ? env('AWS_ACCESS_KEY_ID') : env('GEMINI_API_KEY')
   )).trim();
@@ -347,25 +350,11 @@ export default async function handler(request: Request): Promise<Response> {
     if (path.endsWith('/capabilities')) {
       return respond({ cloud:false, ttsConfigured:isSet, ttsProvider:provider, providers:['gemini','deepinfra','aws-polly'],chunkUpload:false,ocr:false,mode:'netlify' });
     }
-    return respond({ ok:true,provider:isSet ? provider : 'local-fallback',ttsConfigured:isSet,host:'netlify' });
+    return respond({ ok:true,provider,ttsConfigured:isSet,host:'netlify',ttsModel: 'hexgrad/Kokoro-82M',textProvider: 'deepinfra' });
   }
   if (path === '/api/voices' && method === 'GET') {
-    const apiKey = header(request,'x-api-key') || header(request,'x-gemini-api-key') || env('GEMINI_API_KEY');
-    if (!apiKey) return respond({voices:voicesFeatured,source:'featured'});
-    try {
-      const remote = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?page_size=1000',{
-        headers: {'x-goog-api-key':apiKey,Accept:'application/json'},
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!remote.ok) throw new Error('Bibliothèque de voix distante indisponible.');
-      const data = await remote.json() as any;
-      const map = new Map<string,any>(voicesFeatured.map((v:any)=>[v.id,v]));
-      for(const v of data?.voices || []) {
-        const id = String(v?.id || v?.voiceId || v?.name || '').trim();
-        if (id) map.set(id,{id,name:id,displayName:v.displayName || id,description:v.description,languageCode:v.languageCode,accent:v.accent,gender:v.gender,type:v.type});
-      }
-      return respond({voices:[...map.values()],source:'gemini-library'});
-    } catch { return respond({voices:voicesFeatured,source:'featured-fallback'}); }
+    // The preview is Kokoro-only: do not query Gemini's outdated voice catalog.
+    return respond({ voices: [{ id: 'ff_siwis', name: 'Siwis', displayName: 'Siwis · Français (Kokoro)', languageCode: 'fr-FR', type: 'prebuilt' }], source: 'deepinfra-kokoro' });
   }
   if (!path.startsWith('/api/') || method !== 'POST') {
     return respond({error:'Route API non disponible sur Netlify.'},404);
