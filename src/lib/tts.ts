@@ -104,7 +104,6 @@ async function mergeWavBlobs(blobs: Blob[]): Promise<{ blob: Blob; duration: num
   view.setUint16(20, first.audioFormat, true);
   view.setUint16(22, first.channels, true);
   view.setUint32(24, first.sampleRate, true);
-  view.setUint32(28, first.byteRate);
   view.setUint32(28, first.byteRate, true);
   view.setUint16(32, first.blockAlign, true);
   view.setUint16(34, first.bitsPerSample, true);
@@ -272,7 +271,7 @@ async function synthesizeRemoteChunk(
     if (response.status === 429) {
       const detail = (payload.error || '').slice(0, 320).replace(/\s+/g, ' ');
       throw new Error(
-        'Gemini : erreur 429 (quota ou capacité momentanément insuffisante).' +
+        'Le service de lecture est momentanément sollicité (429).' +
         (detail ? ' Détail : ' + detail : '')
       );
     }
@@ -314,8 +313,64 @@ async function sleepWithCancel(
 }
 
 /**
- * Cloud-only audiobook rendering: the app never invokes a local TTS engine.
+ * Handle short-lived voice-service failures and split slow passages automatically.
+ * A successful original passage is then cached in IndexedDB by its stable text hash.
  */
+async function synthesizeResilientChunk(
+  text: string,
+  apiKey: string,
+  voice: string | undefined,
+  shouldCancel: () => boolean,
+  onWait: (seconds: number) => void
+): Promise<Blob> {
+  let lastError: unknown;
+  let canSplit = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (shouldCancel()) throw new Error('Génération interrompue. Les passages terminés sont conservés.');
+    try {
+      const audio = await synthesizeRemoteChunk(text, apiKey, voice);
+      if (!audio.size) throw new Error('Le service n’a renvoyé aucun son.');
+      return audio;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const blocked = /\b(400|401|403|413)\b|invalid|unauthori[sz]ed|forbidden/i.test(reason);
+      const dailyQuota = /daily|per.day|requests per day|quota[^\n]{0,40}0\b/i.test(reason);
+      const rateLimit = /\b429\b|quota|rate.limit/i.test(reason);
+      const slow = /\b(502|503|504|520|522|524)\b|timeout|aborted|timed.out/i.test(reason);
+      const transient = slow || rateLimit || /network|failed to fetch|fetch failed|temporarily|connection/i.test(reason);
+      lastError = error;
+      if (blocked || dailyQuota || !transient) throw error;
+      if (slow && text.length > 180) {
+        canSplit = true;
+        break;
+      }
+      if (attempt < 2) {
+        const wait = rateLimit ? (attempt === 0 ? 6000 : 14000) : (attempt === 0 ? 1700 : 4300);
+        await sleepWithCancel(wait, shouldCancel, onWait);
+      }
+    }
+  }
+
+  if (canSplit && text.length > 180) {
+    const middle = Math.floor(text.length / 2);
+    const space = text.lastIndexOf(' ', middle);
+    const cut = space > text.length / 4 ? space : middle;
+    const halves = [text.slice(0, cut).trim(), text.slice(cut).trim()].filter(Boolean);
+    if (halves.length === 2) {
+      const first = await synthesizeResilientChunk(halves[0], apiKey, voice, shouldCancel, onWait);
+      const second = await synthesizeResilientChunk(halves[1], apiKey, voice, shouldCancel, onWait);
+      if (first.type.includes('wav') && second.type.includes('wav')) {
+        return (await mergeWavBlobs([first, second])).blob;
+      }
+      return new Blob([first, second], { type: first.type || second.type });
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : '';
+  throw new Error('Ce passage n’a pas pu être préparé. Les passages précédents sont sauvegardés : relance le chapitre pour reprendre.' +
+    (detail && /429/.test(detail) ? ' Le service est momentanément très sollicité.' : ''));
+}
+
+/** Generate all passages without a fixed chapter-length timeout. */
 export async function synthesizeChapter(
   text: string,
   onProgress: (value: number, label: string) => void,
@@ -328,19 +383,13 @@ export async function synthesizeChapter(
   const activeKey = (customApiKey || stored.apiKey || '').trim();
   const provider = stored.provider;
   const available = Boolean(activeKey) || await isRemoteTtsAvailable(false, activeKey);
-  if (!available) {
-    throw new Error('Le service ' + provider + ' est indisponible sur Netlify. Vérifie sa configuration.');
-  }
-  if (shouldCancel()) throw new Error('Génération annulée.');
-  const providerLabel = provider === 'deepinfra'
-    ? 'DeepInfra · Kokoro'
-    : provider === 'aws-polly'
-      ? 'Amazon Polly'
-      : 'Gemini';
-  // Each request narrates about 200 words instead of ~80, reducing API calls
-  // and quota pressure without using a long, potentially unstable TTS output.
-  const remoteChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
-  const engineVoiceId = `${provider}:${cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
+  if (!available) throw new Error('La création audio est momentanément indisponible.');
+  if (!text.trim()) throw new Error('Ce chapitre ne contient pas de texte à lire.');
+  if (shouldCancel()) throw new Error('Génération interrompue.');
+  // Small independent requests stay below Netlify's observed 30s gateway limit.
+  const chunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
+  const engineVoiceId = provider + ':' +
+    (cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'));
   const storedSegments = cacheContext
     ? await getSpeechSegments(cacheContext.bookId, cacheContext.chapterId)
     : [];
@@ -348,76 +397,54 @@ export async function synthesizeChapter(
     storedSegments.filter(segment => segment.voiceId === engineVoiceId)
       .map(segment => [segment.index, segment])
   );
-  const remoteBlobs: Blob[] = [];
+  const generated: Blob[] = [];
   let reused = 0;
-  for (let index = 0; index < remoteChunks.length; index += 1) {
-    if (shouldCancel()) throw new Error('Génération annulée. Les passages déjà générés sont conservés.');
-    const chunk = remoteChunks[index];
-    const signature = textFingerprint(chunk);
+  for (let index = 0; index < chunks.length; index++) {
+    if (shouldCancel()) throw new Error('Génération interrompue. Les passages déjà créés sont conservés.');
+    const passage = chunks[index];
+    const signature = textFingerprint(passage);
     const cached = availableSegments.get(index);
-    const progress = Math.round(12 + (index / Math.max(1, remoteChunks.length)) * 82);
-
-    if (cached?.textHash === signature && cached.blob?.size > 0 && (provider !== 'deepinfra' || cached.blob.type.includes('wav'))) {
-      remoteBlobs.push(cached.blob);
+    const progress = Math.round(5 + (index / Math.max(1, chunks.length)) * 90);
+    if (cached?.textHash === signature && cached.blob?.size > 0 &&
+        (provider !== 'deepinfra' || cached.blob.type.includes('wav'))) {
+      generated.push(cached.blob);
       reused++;
-      onProgress(progress, `${providerLabel} · reprise du segment ${index + 1}/${remoteChunks.length} (${reused} sauvegardés)`);
+      onProgress(progress, 'Reprise du passage ' + (index + 1) + '/' + chunks.length +
+        ' · ' + reused + ' déjà sauvegardés');
       continue;
     }
-
-    let segmentAudio: Blob | null = null;
-    for (let attempt = 0; attempt <= 2; attempt++) {
-      if (shouldCancel()) throw new Error('Génération annulée. Les passages déjà générés sont conservés.');
-      onProgress(progress, `${providerLabel} · génération ${index + 1}/${remoteChunks.length}`);
+    onProgress(progress, 'Création de l’audio · passage ' + (index + 1) + '/' + chunks.length);
+    const audio = await synthesizeResilientChunk(
+      passage, activeKey, cloudVoice, shouldCancel,
+      seconds => onProgress(progress, 'Nouvelle tentative dans ' + seconds + ' s · passages conservés')
+    );
+    if (cacheContext) {
       try {
-        segmentAudio = await synthesizeRemoteChunk(chunk, activeKey, cloudVoice);
-        break;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        const quotaError = /429|RESOURCE_EXHAUSTED|quota/i.test(reason);
-        const permanentQuota = /(?:requests? per day|per.?day|daily|quota[^\n]{0,45}0\b)/i.test(reason);
-        if (!quotaError || permanentQuota || attempt === 2) {
-          if (quotaError) {
-            throw new Error(
-              `Gemini a refusé le passage ${index + 1}/${remoteChunks.length} (429). ` +
-              `Les ${remoteBlobs.length} passages déjà réussis sont conservés dans le navigateur. ` +
-              'Relance « Générer ce chapitre » pour les reprendre, sans tout recommencer. ' +
-              reason.slice(0, 230)
-            );
-          }
-          throw error;
-        }
-        const waitMs = attempt === 0 ? 12000 : 30000;
-        await sleepWithCancel(waitMs, shouldCancel, seconds => {
-          onProgress(progress, `Quota ${providerLabel} (429) · nouvelle tentative dans ${seconds}s · passages conservés`);
+        await saveSpeechSegment({
+          id: cacheContext.bookId + ':' + cacheContext.chapterId + ':' + engineVoiceId + ':' + index,
+          bookId: cacheContext.bookId,
+          chapterId: cacheContext.chapterId,
+          voiceId: engineVoiceId,
+          index,
+          textHash: signature,
+          blob: audio,
         });
+      } catch {
+        throw new Error('Le stockage de cet appareil est insuffisant pour conserver la suite de l’audio.');
       }
     }
-    if (!segmentAudio) throw new Error('Aucun audio reçu pour ce passage.');
-    if (cacheContext) {
-      await saveSpeechSegment({
-        id: `${cacheContext.bookId}:${cacheContext.chapterId}:${engineVoiceId}:${index}`,
-        bookId: cacheContext.bookId,
-        chapterId: cacheContext.chapterId,
-        voiceId: engineVoiceId,
-        index,
-        textHash: signature,
-        blob: segmentAudio,
-      });
-    }
-    remoteBlobs.push(segmentAudio);
+    generated.push(audio);
   }
-  onProgress(96, `Assemblage du chapitre audio · ${providerLabel}`);
-  if (remoteBlobs.every(blob => blob.type.includes('wav'))) {
-    const merged = await mergeWavBlobs(remoteBlobs);
-    onProgress(100, `Audio ${providerLabel} prêt`);
+  onProgress(96, 'Assemblage du chapitre · les passages sont conservés');
+  if (generated.every(blob => blob.type.includes('wav'))) {
+    const merged = await mergeWavBlobs(generated);
+    onProgress(100, 'Chapitre audio prêt');
     return { ...merged, engineVoiceId };
   }
-  const combinedBlob = new Blob(remoteBlobs, {
-    type: remoteBlobs[0]?.type || 'audio/mpeg',
-  });
-  const estimatedDuration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
-  onProgress(100, `Audio ${providerLabel} prêt`);
-  return { blob: combinedBlob, duration: estimatedDuration, engineVoiceId };
+  const combinedBlob = new Blob(generated, { type: generated[0]?.type || 'audio/mpeg' });
+  const duration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
+  onProgress(100, 'Chapitre audio prêt');
+  return { blob: combinedBlob, duration, engineVoiceId };
 }
 
 export async function makeBookZip(
