@@ -832,9 +832,25 @@ export default function AudiobookApp() {
   async function generateChapterSummary(chapter: Chapter): Promise<void> {
     if (!selectedBook || summaryLoading) return;
     const book = selectedBook;
+    const resumed = chapter.summaryStatus === 'in_progress' || chapter.summaryStatus === 'interrupted';
     setSummaryLoading(true);
-    setSummaryProgress('Lecture du chapitre…');
+    setSummaryProgress(resumed ? 'Reprise des passages déjà sauvegardés…' : 'Lecture du chapitre…');
     try {
+      // Persist a visible job marker immediately. Without it, closing/reloading
+      // the tab before the first final section makes it appear as if nothing
+      // was ever requested, despite completed local analysis segments.
+      const markedBook: Book = {
+        ...book,
+        updatedAt: Date.now(),
+        chapters: book.chapters.map(item => item.id === chapter.id
+          ? {
+              ...item, summaryStatus: 'in_progress' as const,
+              summaryStartedAt: item.summaryStartedAt || Date.now(),
+            }
+          : item),
+      };
+      await putBook(markedBook);
+      setBooks(current => current.map(item => item.id === markedBook.id ? markedBook : item));
       const indexInBook = book.chapters.findIndex(item => item.id === chapter.id);
       const context = book.chapters.slice(0, indexInBook)
         .map((item, index) => 'Chapitre ' + (index + 1) + ' : ' + item.title).join(', ');
@@ -1008,7 +1024,13 @@ export default function AudiobookApp() {
         const draft: Book = {
           ...book, updatedAt: Date.now(),
           chapters: book.chapters.map(item => item.id === chapter.id
-            ? { ...item, summary: completed.join('\n\n'), summaryProvisional: provisional }
+            ? {
+              ...item,
+              summary: completed.join('\n\n'),
+              summaryProvisional: provisional,
+              summaryStatus: provisional ? 'interrupted' as const : 'complete' as const,
+              summaryStartedAt: undefined,
+            }
             : item),
         };
         await putBook(draft);
@@ -1055,6 +1077,25 @@ export default function AudiobookApp() {
           ' sections préparées. La fiche provisoire est sauvegardée : actualise-la pour compléter les passages manquants.'
         : 'Fiche de lecture complète !');
     } catch (error) {
+      // Retain the visible "Reprendre la fiche" state even if the browser's
+      // request failed before any final section could be displayed.
+      try {
+        const latest = await getBooks();
+        const savedBook = latest.find(item => item.id === book.id);
+        if (savedBook) {
+          const recovered: Book = {
+            ...savedBook,
+            updatedAt: Date.now(),
+            chapters: savedBook.chapters.map(item => item.id === chapter.id
+              ? { ...item, summaryStatus: 'interrupted' as const }
+              : item),
+          };
+          await putBook(recovered);
+          setBooks(current => current.map(item => item.id === recovered.id ? recovered : item));
+        }
+      } catch (storageError) {
+        console.warn('Auralis: unable to persist summary interruption', storageError);
+      }
       showToast(error instanceof Error ? error.message : 'Impossible de préparer cette fiche.', true);
     } finally {
       setSummaryLoading(false);
@@ -2114,6 +2155,10 @@ export default function AudiobookApp() {
                           <>
                             <RefreshCw size={14} className="animate-spin" /> Préparation en cours…
                           </>
+                        ) : selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted' ? (
+                          <>
+                            <RotateCcw size={14} /> Reprendre la fiche
+                          </>
                         ) : selectedChapter.summary ? (
                           <>
                             <RotateCcw size={14} /> Actualiser la fiche
@@ -2128,8 +2173,15 @@ export default function AudiobookApp() {
                     {summaryLoading && summaryProgress && (
                       <p className="lv-summary-note" role="status">{summaryProgress}</p>
                     )}
-                    {selectedChapter.summaryProvisional && !summaryLoading && (
-                      <p className="lv-summary-note">Fiche provisoire : les passages ont été analysés, mais certains restent à regrouper. Utilise « Actualiser la fiche » pour terminer.</p>
+                    {(selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted') && !summaryLoading && (
+                      <p className="lv-summary-note" role="status">
+                        Génération interrompue ou page rechargée. Les passages déjà analysés ont été sauvegardés sur cet appareil.
+                        Clique sur « Reprendre la fiche » pour continuer : fermer l'onglet interrompt la génération, mais pas les étapes enregistrées.
+                      </p>
+                    )}
+                    {selectedChapter.summaryProvisional && !summaryLoading &&
+                      selectedChapter.summaryStatus !== 'interrupted' && (
+                      <p className="lv-summary-note">Fiche provisoire : certains passages restent à regrouper. Utilise « Actualiser la fiche » pour terminer.</p>
                     )}
                   </div>
 
@@ -2154,7 +2206,9 @@ export default function AudiobookApp() {
                       <div style={{ textAlign: 'center', padding: '40px 20px', color: '#94a3b8' }}>
                         <Brain size={48} style={{ margin: '0 auto 16px', opacity: 0.5, color: '#a78bfa' }} />
                         <h3 style={{ color: '#f8fafc', fontSize: '18px', marginBottom: '8px' }}>
-                          Aucune fiche pour « {selectedChapter.title} » pour le moment
+                          {selectedChapter.summaryStatus === 'in_progress' || selectedChapter.summaryStatus === 'interrupted'
+                            ? 'Fiche commencée, à reprendre'
+                            : 'Aucune fiche pour « ' + selectedChapter.title + ' » pour le moment'}
                         </h3>
                         <p style={{ maxWidth: '520px', margin: '0 auto 20px', fontSize: '13px', lineHeight: 1.6 }}>
                           Découvre l'essentiel du chapitre : des actions concrètes pour un livre pratique, ou les choix et les plans des personnages pour un roman.
