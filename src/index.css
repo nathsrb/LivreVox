@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -1615,7 +1616,7 @@ button:disabled {
    AURALIS / ÉDITION NOCTURNE — Design System V1
    Visual-only layer. Preserve every API, handler, audio and PDF flow.
    ============================================================ */
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
 
 :root {
   --ink: #101a24;
