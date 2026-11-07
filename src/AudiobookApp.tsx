@@ -936,14 +936,25 @@ export default function AudiobookApp() {
 
       let finalText = source;
       let finalParts: string[] | undefined;
+      let analysisHasGaps = false;
 
       if (segments.length > 1) {
         let notes: string[] = [];
         for (let index = 0; index < segments.length; index++) {
           setSummaryProgress('Analyse du passage ' + (index + 1) + '/' + segments.length +
             ' · les étapes terminées sont conservées');
-          notes.push(await getOrCreate(0, index, segments[index],
-            () => requestSummary(segments[index], undefined, 'notes')));
+          try {
+            notes.push(await getOrCreate(0, index, segments[index],
+              () => requestSummary(segments[index], undefined, 'notes')));
+          } catch (error) {
+            // A single upstream outage must not erase all the previous chapters'
+            // work. Keep a *clearly provisional* source excerpt, never an
+            // invented summary, and retry this uncached passage next time.
+            analysisHasGaps = true;
+            console.warn('Auralis: chapter passage unavailable', index + 1, error);
+            notes.push('[Passage ' + (index + 1) + ' à réanalyser : extrait du texte original]\n' +
+              segments[index].trim().slice(0, 1800));
+          }
         }
         let stage = 1;
         while (notes.length > 2) {
@@ -955,8 +966,16 @@ export default function AudiobookApp() {
               continue;
             }
             setSummaryProgress('Regroupement de la fiche · étape ' + stage);
-            combined.push(await getOrCreate(stage, Math.floor(index / 2), group.join('\n\n'),
-              () => requestSummary('', group, 'notes')));
+            try {
+              combined.push(await getOrCreate(stage, Math.floor(index / 2), group.join('\n\n'),
+                () => requestSummary('', group, 'notes')));
+            } catch (error) {
+              // Recover with the already analysed facts instead of throwing
+              // away 20+ successful requests because the last merge failed.
+              analysisHasGaps = true;
+              console.warn('Auralis: keeping unmerged reading notes', stage, index, error);
+              combined.push(group.join('\n\n'));
+            }
           }
           notes = combined;
           stage++;
@@ -1023,12 +1042,17 @@ export default function AudiobookApp() {
         await keepDraft(true);
       }
 
-      const isProvisional = unfinished > 0;
+      if (analysisHasGaps) {
+        completed.push('### Analyse à compléter\n' +
+          'Certains passages ou regroupements ont été indisponibles. Cette fiche est provisoire. ' +
+          'Relance « Actualiser la fiche » pour analyser les passages manquants sans perdre les étapes réussies.');
+      }
+      const isProvisional = unfinished > 0 || analysisHasGaps;
       await keepDraft(isProvisional);
       if (!isProvisional) await clearSummarySegments(book.id, chapter.id).catch(() => undefined);
       showToast(isProvisional
         ? (sections.length - unfinished) + '/' + sections.length +
-          ' sections prêtes. Actualise la fiche pour compléter les autres.'
+          ' sections préparées. La fiche provisoire est sauvegardée : actualise-la pour compléter les passages manquants.'
         : 'Fiche de lecture complète !');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Impossible de préparer cette fiche.', true);
