@@ -95,9 +95,12 @@ async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) 
       preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
       speed: 1,
       stream: false,
+      // Avoid waiting in a congested inference queue until Netlify times out.
+      // The client can retry later without discarding already saved passages.
+      fail_fast: true,
     }),
     // Return a recoverable timeout BEFORE Netlify's observed 30s gateway limit.
-    signal: AbortSignal.timeout(18000),
+    signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) throw new Error(`DeepInfra Kokoro ${response.status}: ${await response.text()}`);
   const payload = await response.json() as { audio?: string };
