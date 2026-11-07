@@ -61,6 +61,7 @@ import {
 import {
   clearSpeechSegments,
   clearSummarySegments,
+  countSavedAudioSegments,
   deleteAudio,
   deleteBook,
   getBookAudio,
@@ -235,6 +236,7 @@ export default function AudiobookApp() {
     error?: boolean;
   } | null>(null);
   const [audioMap, setAudioMap] = useState<Record<string, AudioRecord>>({});
+  const [cachedAudioPassages, setCachedAudioPassages] = useState<Record<string, number>>({});
   const [geminiVoices, setGeminiVoices] = useState<GeminiVoiceOption[]>(CLOUD_VOICES);
   const [generation, setGeneration] = useState<{
     active: boolean;
@@ -419,6 +421,26 @@ export default function AudiobookApp() {
       }
     }
   }, [settings]);
+
+  // Show saved work on lengthy chapter audio even after browser reload.
+  // This is a resume indicator, not a claim that a complete audio exists.
+  useEffect(() => {
+    if (!selectedBook) {
+      setCachedAudioPassages({});
+      return;
+    }
+    let cancelled = false;
+    const book = selectedBook;
+    void Promise.all(book.chapters.map(async chapter => ({
+      id: chapter.id,
+      count: await countSavedAudioSegments(book.id, chapter.id),
+    }))).then(items => {
+      if (!cancelled) setCachedAudioPassages(Object.fromEntries(items.map(item => [item.id, item.count])));
+    }).catch(error => {
+      console.warn('Auralis: unable to display saved audio progress', error);
+    });
+    return () => { cancelled = true; };
+  }, [selectedBook?.id, generation?.active]);
 
   useEffect(() => {
     if (!selectedBook) {
@@ -1350,6 +1372,7 @@ export default function AudiobookApp() {
       // Only clear temporary segments AFTER the completed chapter is durable.
       await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
       setAudioMap(current => ({ ...current, [chapter.id]: record }));
+      setCachedAudioPassages(current => ({ ...current, [chapter.id]: 0 }));
       return record;
     } catch (error) {
       showToast(
@@ -2338,7 +2361,7 @@ export default function AudiobookApp() {
                           <span>{chapter.words} mots</span>
                         </div>
                         <span>
-                          {chapter.audioUrl ? 'Audio cloud prêt' : audioMap[chapter.id] ? audioSourceLabel(audioMap[chapter.id].voiceId) : 'À générer'}
+                          {chapter.audioUrl ? 'Audio cloud prêt' : audioMap[chapter.id] ? audioSourceLabel(audioMap[chapter.id].voiceId) : cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
                         </span>
                         <div className="lv-table-actions">
                           {chapter.audioUrl ? (
@@ -2365,7 +2388,7 @@ export default function AudiobookApp() {
                           ) : (
                             <button
                               className="lv-mini-button"
-                              title="Créer l'audio du chapitre"
+                              title={cachedAudioPassages[chapter.id] ? 'Reprendre les passages audio sauvegardés' : "Créer l'audio du chapitre"}
                               onClick={() => {
                                 setChapterId(chapter.id);
                                 void generateOne(
