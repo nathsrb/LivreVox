@@ -259,6 +259,9 @@ export default function AudiobookApp() {
   const fileRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const cancelGeneration = useRef(false);
+  // Prevent two audiobook jobs from flooding Kokoro concurrently if the user
+  // clicks a chapter-row action while another long chapter is still running.
+  const audioJobActive = useRef(false);
   const lastVerifiedSpeech = useRef<{ expiresAt: number; route: SpeechRoute } | null>(null);
   const passwordResolver = useRef<((password: string | null) => void) | null>(null);
 
@@ -1377,8 +1380,21 @@ export default function AudiobookApp() {
     chapter: Chapter,
     mode: 'chapter' | 'book'
   ): Promise<AudioRecord | null> {
-    const ready = await ensureVoiceReady();
-    if (!ready) return null;
+    if (audioJobActive.current) {
+      showToast('Une génération audio est déjà en cours. Les passages de ce chapitre sont en cours de sauvegarde.', true);
+      return null;
+    }
+    audioJobActive.current = true;
+    let ready = false;
+    try {
+      ready = await ensureVoiceReady();
+    } catch (error) {
+      console.warn('Auralis: audio provider preflight error', error);
+    }
+    if (!ready) {
+      audioJobActive.current = false;
+      return null;
+    }
     cancelGeneration.current = false;
     setGeneration({
       active: true,
@@ -1420,6 +1436,7 @@ export default function AudiobookApp() {
       );
       return null;
     } finally {
+      audioJobActive.current = false;
       setGeneration(null);
     }
   }
