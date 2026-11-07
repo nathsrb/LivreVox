@@ -879,7 +879,7 @@ export default function AudiobookApp() {
           }
           if (attempt === 0) await new Promise<void>(resolve => setTimeout(resolve, 1800));
         }
-        if (text.length > 6000 && lastStatus !== 429 && (!parts || parts.length === 0)) {
+        if (text.length > 2400 && lastStatus !== 429 && (!parts || parts.length === 0)) {
           const middle = Math.floor(text.length / 2);
           let cut = text.lastIndexOf('\n\n', middle);
           if (cut < text.length / 4) cut = text.lastIndexOf(' ', middle);
@@ -890,7 +890,7 @@ export default function AudiobookApp() {
         }
         throw new Error(lastStatus === 429
           ? 'La lecture est très sollicitée en ce moment. Tes progrès ont été conservés.'
-          : 'La fiche a pris trop de temps. Tes passages déjà étudiés sont sauvegardés.');
+          : 'Ce passage n’a pas pu être analysé. Les étapes déjà terminées ont été conservées : relance la fiche pour reprendre.');
       };
 
       const source = chapter.text.trim();
