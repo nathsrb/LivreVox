@@ -34,6 +34,16 @@ type RemoteTtsResponse = {
 
 let remoteCapabilityCache: { value: boolean; expiresAt: number } | null = null;
 
+export type SpeechRoute = 'openai' | 'inference';
+let preferredSpeechRoute: SpeechRoute = 'openai';
+export function setPreferredSpeechRoute(route: SpeechRoute): void {
+  preferredSpeechRoute = route;
+}
+export function getPreferredSpeechRoute(): SpeechRoute {
+  return preferredSpeechRoute;
+}
+
+
 // Read only small WAV headers: never materialize a multi-hour audio file in RAM.
 async function parseWav(blob: Blob): Promise<WavMeta> {
   const header = await blob.slice(0, Math.min(65536, blob.size)).arrayBuffer();
@@ -232,7 +242,8 @@ export async function getGeminiVoices(customApiKey?: string): Promise<GeminiVoic
 async function synthesizeRemoteChunk(
   text: string,
   customApiKey?: string,
-  cloudVoice?: string
+  cloudVoice?: string,
+  route: SpeechRoute = preferredSpeechRoute
 ): Promise<Blob> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
@@ -249,6 +260,7 @@ async function synthesizeRemoteChunk(
     body: JSON.stringify({
       text,
       provider: stored.provider,
+      ttsRoute: route,
       apiKey: activeKey || undefined,
       apiSecret: stored.apiSecret,
       region: stored.region,
@@ -328,8 +340,15 @@ async function synthesizeResilientChunk(
   for (let attempt = 0; attempt < 3; attempt++) {
     if (shouldCancel()) throw new Error('Génération interrompue. Les passages terminés sont conservés.');
     try {
-      const audio = await synthesizeRemoteChunk(text, apiKey, voice);
+      // A timeout on one DeepInfra API surface does not prove Kokoro cannot
+      // run on the other. Switch routes on the first retry; keep the cache
+      // keyed to the same voice so already rendered chunks remain reusable.
+      const route: SpeechRoute = attempt === 1
+        ? (preferredSpeechRoute === 'openai' ? 'inference' : 'openai')
+        : preferredSpeechRoute;
+      const audio = await synthesizeRemoteChunk(text, apiKey, voice, route);
       if (!audio.size) throw new Error('Le service n’a renvoyé aucun son.');
+      setPreferredSpeechRoute(route);
       return audio;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -391,11 +410,11 @@ export async function synthesizeChapter(
   // Avoid long Kokoro inference calls that time out behind Netlify's gateway.
   // Keep recognizing previous 720/480/1200-char divisions so older recorded
   // passages are never discarded on an existing chapter.
-  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 720 : 900);
-  // Only retain the 360-character layout when it already contains saved work.
-  // Otherwise it needlessly doubles the request count for a 33k-word chapter.
+  // 480 characters bounds each voice request, while still allowing resume
+  // of recordings split by older app versions at 360, 720 or 1200 chars.
+  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 900);
   const previousTinyChunks = chunkForSpeech(text, 360);
-  const previousChunks = chunkForSpeech(text, 480);
+  const previousFastChunks = chunkForSpeech(text, 720);
   const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
     (cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'));
@@ -411,7 +430,7 @@ export async function synthesizeChapter(
   // Keep the original division for a chapter already in progress: never throw
   // away successful passages when upgrading from a previous preview.
   const chunks = hasMatches(previousTinyChunks) ? previousTinyChunks :
-    hasMatches(previousChunks) ? previousChunks :
+    hasMatches(previousFastChunks) ? previousFastChunks :
     hasMatches(legacyChunks) ? legacyChunks : fastChunks;
   const generated: Blob[] = new Array(chunks.length);
   let completed = 0;
