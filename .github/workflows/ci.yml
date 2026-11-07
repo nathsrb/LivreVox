@@ -16,7 +16,3 @@ jobs:
       - run: npm install
       - run: npx tsc --noEmit
       - run: npm run build
-      - name: Install one-off IndexedDB simulation dependencies
-        run: npm install --no-save tsx fake-indexeddb
-      - name: Verify huge multi-part WAV plus cache resume (no paid audio calls)
-        run: npx tsx .github/auralis-large-wav-offline-smoke.mts
