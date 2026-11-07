@@ -9,6 +9,7 @@ export type Chapter = {
   pageStart?: number;
   pageEnd?: number;
   summary?: string;
+  summaryProvisional?: boolean;
   summaryLoading?: boolean;
   lastPositionSeconds?: number;
 };
