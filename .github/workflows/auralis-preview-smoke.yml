@@ -11,26 +11,68 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
-      - name: Check chapter summary endpoint (non-sensitive synthetic text)
+      - name: Verify long and structured chapter summaries on preview
         shell: bash
         run: |
-          set -euo pipefail
-          URL="https://deploy-preview-2--auralis-slnr.netlify.app/api/chapters/summary"
-          PAYLOAD='{"provider":"deepinfra","summaryMode":"notes","bookTitle":"Livre de test","chapterTitle":"Une méthode simple","chapterText":"Ce chapitre explique comment construire une méthode de lecture. Premièrement identifier un objectif précis. Deuxièmement noter les obstacles et choisir une première action. Troisièmement pratiquer pendant quinze minutes chaque jour et évaluer ses progrès. Il faut éviter de confondre l objectif et les moyens utilisés pour y arriver."}'
-          STATUS=$(curl -sS --max-time 55 -o /tmp/auralis-response.json -w '%{http_code}' -H 'Content-Type: application/json' -X POST --data "$PAYLOAD" "$URL")
-          echo "HTTP: $STATUS"
           python3 - <<'PY'
           import json
-          p='/tmp/auralis-response.json'
-          try:
-              data=json.load(open(p))
-              if 'summary' in data:
-                  print('Summary length:',len(data['summary']))
-                  print('Summary excerpt:',data['summary'][:220])
-              else:
-                  print('Service error:',str(data.get('error','unknown'))[:700])
-          except Exception as e: print('Invalid response:',str(e)[:200])
+          import sys
+          import urllib.request
+          import urllib.error
+
+          url = "https://deploy-preview-2--auralis-slnr.netlify.app/api/chapters/summary"
+          # Synthetic material only. No user content or API credentials are sent.
+          items = [
+              f"Étape {i}: définir un enjeu {i}, observer une faiblesse distincte du personnage, "
+              f"choisir une action cohérente et mesurer ses conséquences pour le scénario. "
+              f"Réévaluer cette action au regard des intentions de l'adversaire. "
+              for i in range(1, 62)
+          ]
+          long_text = "\\n\\n".join(items)
+          notes = [
+              "L'auteur explique les objectifs du héros, le désir et le besoin moral. "
+              "Il demande d'identifier le conflit, l'adversaire et les décisions, puis de les lier par cause et effet.",
+              "La méthode consiste à choisir une prémisse, partir de la prise de conscience finale et remonter aux choix initiaux. "
+              "Il faut construire une liste de scènes et vérifier la cohérence de leurs conséquences."
+          ]
+          cases = [
+              ("notes-long", {"chapterText": long_text, "summaryMode": "notes"}),
+              ("overview", {"chapterText": "", "summaryParts": notes, "summaryMode": "overview"}),
+              ("actions", {"chapterText": "", "summaryParts": notes, "summaryMode": "actions"}),
+          ]
+          for name, patch in cases:
+              body = {
+                  "provider": "deepinfra",
+                  "bookTitle": "Exemple d'un manuel de scénario",
+                  "chapterTitle": "Construire une intrigue",
+                  **patch,
+              }
+              req = urllib.request.Request(
+                  url, data=json.dumps(body).encode(),
+                  headers={"Content-Type": "application/json"}, method="POST")
+              status = 0
+              try:
+                  with urllib.request.urlopen(req, timeout=65) as response:
+                      status = response.status
+                      data = json.loads(response.read().decode())
+              except urllib.error.HTTPError as error:
+                  status = error.code
+                  data = json.loads(error.read().decode())
+              except Exception as error:
+                  print(name, "transport failure", type(error).__name__)
+                  sys.exit(1)
+              result = str(data.get("summary") or "")
+              print(name, "HTTP", status, "chars", len(result))
+              if status != 200 or not result.strip():
+                  print(name, "error", str(data.get("error", "empty"))[:400])
+                  sys.exit(1)
+              if name == "overview" and ("### Comprendre le chapitre" not in result or "### L'essentiel" not in result):
+                  print("Missing overview sections")
+                  sys.exit(1)
+              if name == "actions" and ("### Passer à la pratique" not in result or "### Ce qu'il faut retenir" not in result):
+                  print("Missing practical sections")
+                  sys.exit(1)
+          print("All chapter summary smoke tests passed")
           PY
-          test "$STATUS" = 200
