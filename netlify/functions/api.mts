@@ -85,33 +85,80 @@ async function synthesizeGemini(text: string, voice: string, apiKey: string) {
   return { buffer, mimeType: 'audio/wav', extension: 'wav' };
 }
 
-async function synthesizeDeepInfra(text: string, voice: string, apiKey: string) {
-  const response = await fetch('https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      tts_response_format: 'wav',
-      preset_voice: [voice && voice !== 'Kore' ? voice : 'ff_siwis'],
-      speed: 1,
-      stream: false,
-      // Avoid waiting in a congested inference queue until Netlify times out.
-      // The client can retry later without discarding already saved passages.
-      fail_fast: true,
-    }),
-    // Return a recoverable timeout BEFORE Netlify's observed 30s gateway limit.
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!response.ok) throw new Error(`DeepInfra Kokoro ${response.status}: ${await response.text()}`);
-  const payload = await response.json() as { audio?: string };
-  if (!payload.audio) throw new Error('DeepInfra n’a renvoyé aucun audio.');
-  if (/^https?:\/\//.test(payload.audio)) {
-    const audio = await fetch(payload.audio);
-    if (!audio.ok) throw new Error('Impossible de récupérer l’audio DeepInfra.');
-    return { buffer: Buffer.from(await audio.arrayBuffer()), mimeType: 'audio/wav', extension: 'wav' };
+type DeepInfraSpeechRoute = 'openai' | 'inference';
+
+async function synthesizeDeepInfra(
+  text: string, voice: string, apiKey: string, route: DeepInfraSpeechRoute = 'openai'
+) {
+  // Kokoro has two documented API surfaces. Use the OpenAI-compatible binary
+  // speech endpoint first, with the inference endpoint as an independent fallback.
+  // Never make both calls in one Netlify invocation: a queued first call can
+  // consume the whole function deadline.
+  const selectedVoice = voice && voice !== 'Kore' ? voice : 'ff_siwis';
+  const isOpenAI = route === 'openai';
+  const endpoint = isOpenAI
+    ? 'https://api.deepinfra.com/v1/openai/audio/speech'
+    : 'https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M';
+  const payload = isOpenAI
+    ? {
+        model: 'hexgrad/Kokoro-82M',
+        input: text,
+        voice: selectedVoice,
+        response_format: 'wav',
+        speed: 1,
+        service_tier: 'priority',
+      }
+    : {
+        text,
+        tts_response_format: 'wav',
+        preset_voice: [selectedVoice],
+        speed: 1,
+        stream: false,
+        service_tier: 'priority',
+      };
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(22000),
+    });
+  } catch (error) {
+    console.warn('[auralis-tts] DeepInfra connection failure', route,
+      error instanceof Error ? error.name : 'network');
+    throw error;
   }
-  const clean = payload.audio.includes(',') ? payload.audio.slice(payload.audio.indexOf(',') + 1) : payload.audio;
-  return { buffer: Buffer.from(clean, 'base64'), mimeType: 'audio/wav', extension: 'wav' };
+  if (!response.ok) {
+    const status = response.status;
+    const detail = (await response.text()).slice(0, 240);
+    console.warn('[auralis-tts] DeepInfra returned', status, route);
+    throw new Error('DeepInfra Kokoro (' + route + ') HTTP ' + status +
+      (status === 429 ? ' : file d’attente saturée.' : ': ' + detail));
+  }
+  if (isOpenAI) {
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.startsWith('audio/') && !contentType.includes('octet-stream'))
+      throw new Error('DeepInfra OpenAI a renvoyé un format audio invalide.');
+    const audio = Buffer.from(await response.arrayBuffer());
+    if (audio.length < 44 || audio.subarray(0, 4).toString() !== 'RIFF')
+      throw new Error('Le fichier WAV reçu de Kokoro est incomplet.');
+    return { buffer: audio, mimeType: 'audio/wav', extension: 'wav' };
+  }
+  const result = await response.json() as { audio?: string };
+  if (!result.audio) throw new Error('DeepInfra Kokoro n’a renvoyé aucun audio.');
+  let audio: Buffer;
+  if (/^https?:\/\//.test(result.audio)) {
+    const r = await fetch(result.audio, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('Impossible de récupérer le WAV de Kokoro.');
+    audio = Buffer.from(await r.arrayBuffer());
+  } else {
+    const encoded = result.audio.includes(',') ? result.audio.slice(result.audio.indexOf(',') + 1) : result.audio;
+    audio = Buffer.from(encoded, 'base64');
+  }
+  if (audio.length < 44 || audio.subarray(0, 4).toString() !== 'RIFF')
+    throw new Error('Kokoro a renvoyé un WAV incomplet.');
+  return { buffer: audio, mimeType: 'audio/wav', extension: 'wav' };
 }
 
 async function synthesizePolly(text: string, voice: string, accessKeyId: string, secretAccessKey: string, region: string) {
@@ -152,9 +199,11 @@ async function synthesizePolly(text: string, voice: string, accessKeyId: string,
   return { buffer: Buffer.from(await response.arrayBuffer()), mimeType: 'audio/mpeg', extension: 'mp3' };
 }
 
-async function synthesizeProviderSpeech(text: string, voice: string, credentials: ProviderCredentials) {
+async function synthesizeProviderSpeech(
+  text: string, voice: string, credentials: ProviderCredentials, route: DeepInfraSpeechRoute = 'openai'
+) {
   if (!credentials.apiKey) throw new Error('Clé API manquante.');
-  if (credentials.provider === 'deepinfra') return synthesizeDeepInfra(text, voice, credentials.apiKey);
+  if (credentials.provider === 'deepinfra') return synthesizeDeepInfra(text, voice, credentials.apiKey, route);
   if (credentials.provider === 'aws-polly') {
     if (!credentials.apiSecret) throw new Error('AWS Secret Access Key manquante.');
     return synthesizePolly(text, voice, credentials.apiKey, credentials.apiSecret, credentials.region || 'eu-west-3');
@@ -319,7 +368,8 @@ function splitTextForTts(text: string, maxLen = 7500): string[] {
 async function synthesizeSpeech(
   text: string,
   voiceName: string,
-  credentials: ProviderCredentials
+  credentials: ProviderCredentials,
+  route: DeepInfraSpeechRoute = 'openai'
 ): Promise<{ buffer: Buffer; mimeType: string; extension: string }> {
   const segments = splitTextForTts(text).filter(Boolean);
   const outputs: Array<{ buffer: Buffer; mimeType: string; extension: string }> = [];
@@ -327,7 +377,7 @@ async function synthesizeSpeech(
     let lastError: unknown;
     for (let attempt = 0; attempt < (credentials.provider === 'deepinfra' ? 1 : 3); attempt += 1) {
       try {
-        outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials));
+        outputs.push(await synthesizeProviderSpeech(segments[i], voiceName, credentials, route));
         lastError = undefined;
         break;
       } catch (error) {
@@ -407,7 +457,8 @@ export default async function handler(request: Request): Promise<Response> {
     if (!credentials.apiKey) return respond({ok:false,error:'Ajoute la clé dans Netlify → Environment variables, ou saisis-la ici.'},503);
     if (provider === 'aws-polly' && !credentials.apiSecret) return respond({ok:false,error:'AWS_SECRET_ACCESS_KEY manquante.'},503);
     try {
-      await synthesizeProviderSpeech('Test de connexion Auralis.',provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore', credentials);
+      const speechRoute: DeepInfraSpeechRoute = body.ttsRoute === 'inference' ? 'inference' : 'openai';
+      await synthesizeProviderSpeech('Test de connexion Auralis.',provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore', credentials, speechRoute);
       return respond({ok:true,provider,message:'Connexion fournisseur validée.'});
     } catch (err) { const e=classifyError(err); return respond({ok:false,error:e.error},e.status); }
   }
@@ -418,7 +469,8 @@ export default async function handler(request: Request): Promise<Response> {
     if (!credentials.apiKey) return respond({error:'Clé API manquante : configure-la dans Netlify.'},503);
     try {
       const voice = String(body.voice || (provider==='deepinfra'?'ff_siwis':provider==='aws-polly'?'Lea':'Kore')).slice(0,128);
-      const audio = await synthesizeSpeech(text,voice,credentials);
+      const speechRoute: DeepInfraSpeechRoute = body.ttsRoute === 'inference' ? 'inference' : 'openai';
+      const audio = await synthesizeSpeech(text,voice,credentials,speechRoute);
       // Stream as binary rather than base64 JSON (Netlify's buffered 6 MB limit).
       const bytes = audio.buffer;
       if (bytes.byteLength > 19 * 1024 * 1024) return respond({error:'Audio trop volumineux, découpe le texte.'},413);
