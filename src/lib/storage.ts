@@ -1,10 +1,21 @@
 import type { AudioRecord, Book } from '../types';
 
 const DB_NAME = 'livrevox-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const BOOKS = 'books';
 const AUDIO = 'audio';
 const SPEECH_SEGMENTS = 'speech_segments';
+const SUMMARY_SEGMENTS = 'summary_segments';
+
+export type SavedSummarySegment = {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  stage: number;
+  index: number;
+  textHash: string;
+  text: string;
+};
 
 export type SavedSpeechSegment = {
   id: string;
@@ -29,6 +40,11 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SPEECH_SEGMENTS)) {
         const store = db.createObjectStore(SPEECH_SEGMENTS, { keyPath: 'id' });
+        store.createIndex('bookId', 'bookId', { unique: false });
+        store.createIndex('chapterId', 'chapterId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(SUMMARY_SEGMENTS)) {
+        const store = db.createObjectStore(SUMMARY_SEGMENTS, { keyPath: 'id' });
         store.createIndex('bookId', 'bookId', { unique: false });
         store.createIndex('chapterId', 'chapterId', { unique: false });
       }
@@ -80,7 +96,7 @@ export async function putBook(book: Book): Promise<void> {
 export async function deleteBook(bookId: string): Promise<void> {
   const db = await openDb();
   try {
-    const tx = db.transaction([BOOKS, AUDIO, SPEECH_SEGMENTS], 'readwrite');
+    const tx = db.transaction([BOOKS, AUDIO, SPEECH_SEGMENTS, SUMMARY_SEGMENTS], 'readwrite');
     const finished = transactionDone(tx);
     tx.objectStore(BOOKS).delete(bookId);
 
@@ -98,7 +114,7 @@ export async function deleteBook(bookId: string): Promise<void> {
       });
     }
     // Queue both cursor operations before the IndexedDB transaction commits.
-    await Promise.all([removeByBook(AUDIO), removeByBook(SPEECH_SEGMENTS)]);
+    await Promise.all([removeByBook(AUDIO), removeByBook(SPEECH_SEGMENTS), removeByBook(SUMMARY_SEGMENTS)]);
     await finished;
   } finally {
     db.close();
@@ -192,6 +208,53 @@ export async function clearSpeechSegments(bookId: string, chapterId: string): Pr
       cursorReq.onerror = () => reject(cursorReq.error ?? new Error('Suppression segments impossible.'));
     });
     await finished;
+  } finally {
+    db.close();
+  }
+}
+
+/** Durable chapter notes: a slow final merge never discards completed analysis. */
+export async function getSummarySegments(bookId: string, chapterId: string): Promise<SavedSummarySegment[]> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SUMMARY_SEGMENTS, 'readonly');
+    const values = await requestAsPromise(
+      tx.objectStore(SUMMARY_SEGMENTS).index('chapterId')
+        .getAll(IDBKeyRange.only(chapterId)) as IDBRequest<SavedSummarySegment[]>
+    );
+    return values.filter(item => item.bookId === bookId);
+  } finally {
+    db.close();
+  }
+}
+
+export async function saveSummarySegment(segment: SavedSummarySegment): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SUMMARY_SEGMENTS, 'readwrite');
+    tx.objectStore(SUMMARY_SEGMENTS).put(segment);
+    await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+export async function clearSummarySegments(bookId: string, chapterId: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(SUMMARY_SEGMENTS, 'readwrite');
+    const complete = transactionDone(tx);
+    const cursors = tx.objectStore(SUMMARY_SEGMENTS).index('chapterId').openCursor(IDBKeyRange.only(chapterId));
+    await new Promise<void>((resolve, reject) => {
+      cursors.onsuccess = () => {
+        const cursor = cursors.result;
+        if (!cursor) { resolve(); return; }
+        if ((cursor.value as SavedSummarySegment).bookId === bookId) cursor.delete();
+        cursor.continue();
+      };
+      cursors.onerror = () => reject(cursors.error || new Error('Erreur de nettoyage de la fiche.'));
+    });
+    await complete;
   } finally {
     db.close();
   }
