@@ -835,33 +835,57 @@ export default function AudiobookApp() {
         .map((c, i) => `Chapitre ${i + 1} : ${c.title}`)
         .join(', ');
 
+      // Retry temporary service errors; if a long segment stays slow, break it
+      // into smaller passages without dropping any of the chapter's content.
       const requestSummary = async (text: string, parts?: string[]): Promise<string> => {
-        const res = await fetch('/api/chapters/summary', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
-            'x-tts-provider': settings.ttsProvider || 'deepinfra',
-          },
-          body: JSON.stringify({
-            chapterText: text,
-            summaryParts: parts,
-            chapterTitle: chapter.title,
-            bookTitle: selectedBook.title,
-            previousChaptersContext: prevContext,
-            provider: settings.ttsProvider || 'deepinfra',
-          }),
+        const payload = JSON.stringify({
+          chapterText: text,
+          summaryParts: parts,
+          chapterTitle: chapter.title,
+          bookTitle: selectedBook.title,
+          previousChaptersContext: prevContext,
+          provider: settings.ttsProvider || 'deepinfra',
         });
-        if (!res.ok) {
-          const detail = await res.json().catch(() => ({}));
-          console.error('Auralis summary request failed:', res.status, detail);
-          throw new Error(res.status === 429
-            ? 'Le service est très sollicité. Réessaie dans un instant.'
-            : 'Cette fiche n’a pas pu être préparée. Réessaie dans un instant.');
+        let lastStatus = 0;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await fetch('/api/chapters/summary', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+                'x-tts-provider': settings.ttsProvider || 'deepinfra',
+              },
+              body: payload,
+            });
+            lastStatus = res.status;
+            if (res.ok) {
+              const data = await res.json();
+              if (typeof data.summary === 'string' && data.summary.trim()) return data.summary.trim();
+              throw new Error('Le service a renvoyé une fiche vide.');
+            }
+            if (res.status !== 429 && res.status < 500) {
+              throw new Error('Cette fiche ne peut pas être préparée pour le moment.');
+            }
+            console.warn('Auralis fiche: nouvelle tentative après réponse', res.status);
+          } catch (error) {
+            if (error instanceof Error && /fiche ne peut pas|fiche vide/.test(error.message)) throw error;
+            console.warn('Auralis fiche: erreur temporaire de connexion', error);
+          }
+          if (attempt === 0) await new Promise<void>(resolve => setTimeout(resolve, 1800));
         }
-        const data = await res.json();
-        if (typeof data.summary !== 'string' || !data.summary.trim()) throw new Error('La fiche est vide. Réessaie.');
-        return data.summary.trim();
+        if (text.length > 6500 && lastStatus !== 429 && (!parts || !parts.length)) {
+          const midpoint = Math.floor(text.length / 2);
+          let cut = text.lastIndexOf('\n\n', midpoint);
+          if (cut < text.length / 4) cut = text.lastIndexOf(' ', midpoint);
+          if (cut < text.length / 4) cut = midpoint;
+          const left = await requestSummary(text.slice(0, cut).trim());
+          const right = await requestSummary(text.slice(cut).trim());
+          return requestSummary('', [left, right]);
+        }
+        throw new Error(lastStatus === 429
+          ? 'Le service est temporairement très sollicité. Tes autres fiches restent enregistrées.'
+          : 'La préparation de cette fiche a pris trop de temps. Réessaie dans un instant.');
       };
 
       // Cover each part of a long chapter instead of silently ignoring the end.
@@ -877,11 +901,19 @@ export default function AudiobookApp() {
         offset = end;
       }
       if (segments.length > 24) throw new Error('Ce chapitre est trop long pour être analysé en une seule fiche.');
-      const notes: string[] = [];
+      let notes: string[] = [];
       for (const segment of segments) {
         notes.push(await requestSummary(segment));
       }
-      const summaryText = notes.length === 1 ? notes[0] : await requestSummary('', notes);
+      // Merge smaller groups to avoid a single oversized consolidation request.
+      while (notes.length > 1) {
+        const combined: string[] = [];
+        for (let i = 0; i < notes.length; i += 4) {
+          combined.push(await requestSummary('', notes.slice(i, i + 4)));
+        }
+        notes = combined;
+      }
+      const summaryText = notes[0];
 
       const updatedBook: Book = {
         ...selectedBook,
