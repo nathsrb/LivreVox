@@ -10,6 +10,9 @@ export type Chapter = {
   pageEnd?: number;
   summary?: string;
   summaryProvisional?: boolean;
+  /** Preserved across reloads: a browser tab cannot continue generating while closed. */
+  summaryStatus?: 'in_progress' | 'interrupted' | 'complete';
+  summaryStartedAt?: number;
   summaryLoading?: boolean;
   lastPositionSeconds?: number;
 };
