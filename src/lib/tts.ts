@@ -21,7 +21,8 @@ type WavMeta = {
   byteRate: number;
   blockAlign: number;
   audioFormat: number;
-  data: Uint8Array;
+  dataOffset: number;
+  dataSize: number;
 };
 
 type RemoteTtsResponse = {
@@ -33,26 +34,24 @@ type RemoteTtsResponse = {
 
 let remoteCapabilityCache: { value: boolean; expiresAt: number } | null = null;
 
-function parseWav(buffer: ArrayBuffer): WavMeta {
-  const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
+// Read only small WAV headers: never materialize a multi-hour audio file in RAM.
+async function parseWav(blob: Blob): Promise<WavMeta> {
+  const header = await blob.slice(0, Math.min(65536, blob.size)).arrayBuffer();
+  const view = new DataView(header);
+  const bytes = new Uint8Array(header);
   const four = (offset: number) =>
-    String.fromCharCode(
-      bytes[offset],
-      bytes[offset + 1],
-      bytes[offset + 2],
-      bytes[offset + 3]
-    );
-  if (four(0) !== 'RIFF' || four(8) !== 'WAVE')
-    throw new Error('Le moteur vocal a renvoyé un audio WAV invalide.');
+    String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+  if (bytes.length < 44 || four(0) !== 'RIFF' || four(8) !== 'WAVE')
+    throw new Error('Le passage audio reçu est invalide.');
   let offset = 12;
-  let format: Omit<WavMeta, 'data'> | null = null;
-  let data: Uint8Array | null = null;
-  while (offset + 8 <= buffer.byteLength) {
+  let format: Omit<WavMeta, 'dataOffset' | 'dataSize'> | null = null;
+  let dataOffset = -1;
+  let dataSize = 0;
+  while (offset + 8 <= bytes.length) {
     const id = four(offset);
     const size = view.getUint32(offset + 4, true);
     const payload = offset + 8;
-    if (id === 'fmt ' && size >= 16) {
+    if (id === 'fmt ' && size >= 16 && payload + 16 <= bytes.length) {
       format = {
         audioFormat: view.getUint16(payload, true),
         channels: view.getUint16(payload + 2, true),
@@ -62,67 +61,63 @@ function parseWav(buffer: ArrayBuffer): WavMeta {
         bitsPerSample: view.getUint16(payload + 14, true),
       };
     }
-    if (id === 'data')
-      data = bytes.slice(payload, Math.min(payload + size, bytes.length));
-    offset = payload + size + (size % 2);
+    if (id === 'data') {
+      dataOffset = payload;
+      dataSize = Math.min(size === 0xffffffff ? blob.size - payload : size, blob.size - payload);
+      break;
+    }
+    const next = payload + size + (size % 2);
+    if (next <= offset) break;
+    offset = next;
   }
-  if (!format || !data) throw new Error('Impossible de décoder le WAV généré.');
-  return { ...format, data };
+  if (!format || dataOffset < 0 || dataSize <= 0) throw new Error('Audio WAV incomplet.');
+  return { ...format, dataOffset, dataSize };
 }
 
 function writeAscii(view: DataView, offset: number, text: string): void {
-  for (let i = 0; i < text.length; i += 1)
-    view.setUint8(offset + i, text.charCodeAt(i));
+  for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
 }
 
-async function mergeWavBlobs(
-  blobs: Blob[]
-): Promise<{ blob: Blob; duration: number }> {
-  if (!blobs.length) throw new Error('Aucun segment audio généré.');
-  const parsed = await Promise.all(
-    blobs.map(async blob => parseWav(await blob.arrayBuffer()))
-  );
+async function mergeWavBlobs(blobs: Blob[]): Promise<{ blob: Blob; duration: number }> {
+  if (!blobs.length) throw new Error('Aucun passage audio disponible.');
+  const parsed = await Promise.all(blobs.map(parseWav));
   const first = parsed[0];
+  if (!first.byteRate || !first.blockAlign) throw new Error('Format audio non pris en charge.');
   for (const wav of parsed) {
-    if (
-      wav.sampleRate !== first.sampleRate ||
-      wav.channels !== first.channels ||
-      wav.bitsPerSample !== first.bitsPerSample
-    ) {
-      throw new Error('Les segments audio n’utilisent pas le même format.');
+    if (wav.sampleRate !== first.sampleRate || wav.channels !== first.channels ||
+        wav.bitsPerSample !== first.bitsPerSample || wav.audioFormat !== first.audioFormat) {
+      throw new Error('Les passages audio n’utilisent pas le même format.');
     }
   }
-  const silenceBytes =
-    Math.floor((first.byteRate * 0.12) / first.blockAlign) * first.blockAlign;
-  const totalAudioBytes =
-    parsed.reduce((sum, wav) => sum + wav.data.length, 0) +
-    silenceBytes * Math.max(0, parsed.length - 1);
-  const output = new ArrayBuffer(44 + totalAudioBytes);
-  const view = new DataView(output);
-  const bytes = new Uint8Array(output);
+  const silenceBytes = Math.floor((first.byteRate * 0.10) / first.blockAlign) * first.blockAlign;
+  const dataBytes = parsed.reduce((sum, wav) => sum + wav.dataSize, 0) + silenceBytes * Math.max(0, blobs.length - 1);
+  // WAV uses 32-bit RIFF sizes. Keep a clear guard instead of overflowing the header.
+  if (dataBytes > 0xffffffff - 44)
+    throw new Error('Ce chapitre dépasse la capacité d’un seul fichier audio. Il doit être enregistré en plusieurs parties.');
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
   writeAscii(view, 0, 'RIFF');
-  view.setUint32(4, 36 + totalAudioBytes, true);
+  view.setUint32(4, 36 + dataBytes, true);
   writeAscii(view, 8, 'WAVE');
   writeAscii(view, 12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, first.audioFormat, true);
   view.setUint16(22, first.channels, true);
   view.setUint32(24, first.sampleRate, true);
+  view.setUint32(28, first.byteRate);
   view.setUint32(28, first.byteRate, true);
   view.setUint16(32, first.blockAlign, true);
   view.setUint16(34, first.bitsPerSample, true);
   writeAscii(view, 36, 'data');
-  view.setUint32(40, totalAudioBytes, true);
-  let cursor = 44;
-  parsed.forEach((wav, index) => {
-    bytes.set(wav.data, cursor);
-    cursor += wav.data.length;
-    if (index < parsed.length - 1) cursor += silenceBytes;
+  view.setUint32(40, dataBytes, true);
+  const pieces: BlobPart[] = [header];
+  const silence = silenceBytes ? new Blob([new Uint8Array(silenceBytes)]) : null;
+  blobs.forEach((part, index) => {
+    const wav = parsed[index];
+    pieces.push(part.slice(wav.dataOffset, wav.dataOffset + wav.dataSize));
+    if (index < blobs.length - 1 && silence) pieces.push(silence);
   });
-  return {
-    blob: new Blob([output], { type: 'audio/wav' }),
-    duration: totalAudioBytes / first.byteRate,
-  };
+  return { blob: new Blob(pieces, { type: 'audio/wav' }), duration: dataBytes / first.byteRate };
 }
 
 function base64ToBlob(base64: string, mimeType: string): Blob {
@@ -344,7 +339,7 @@ export async function synthesizeChapter(
       : 'Gemini';
   // Each request narrates about 200 words instead of ~80, reducing API calls
   // and quota pressure without using a long, potentially unstable TTS output.
-  const remoteChunks = chunkForSpeech(text, 1200);
+  const remoteChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 700);
   const engineVoiceId = `${provider}:${cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore')}`;
   const storedSegments = cacheContext
     ? await getSpeechSegments(cacheContext.bookId, cacheContext.chapterId)
