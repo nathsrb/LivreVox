@@ -822,34 +822,53 @@ export default function AudiobookApp() {
         .map((c, i) => `Chapitre ${i + 1} : ${c.title}`)
         .join(', ');
 
-      const res = await fetch('/api/chapters/summary', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
-          ...(settings.apiSecret ? { 'x-api-secret': settings.apiSecret } : {}),
-          'x-tts-provider': settings.ttsProvider || 'gemini',
-          ...(settings.awsRegion ? { 'x-aws-region': settings.awsRegion } : {}),
-        },
-        body: JSON.stringify({
-          chapterText: chapter.text,
-          chapterTitle: chapter.title,
-          bookTitle: selectedBook.title,
-          previousChaptersContext: prevContext,
-          customApiKey: settings.apiKey,
-          provider: settings.ttsProvider || 'gemini',
-          apiSecret: settings.apiSecret,
-          region: settings.awsRegion,
-        }),
-      });
+      const requestSummary = async (text: string, parts?: string[]): Promise<string> => {
+        const res = await fetch('/api/chapters/summary', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(settings.apiKey ? { 'x-api-key': settings.apiKey } : {}),
+            'x-tts-provider': settings.ttsProvider || 'deepinfra',
+          },
+          body: JSON.stringify({
+            chapterText: text,
+            summaryParts: parts,
+            chapterTitle: chapter.title,
+            bookTitle: selectedBook.title,
+            previousChaptersContext: prevContext,
+            provider: settings.ttsProvider || 'deepinfra',
+          }),
+        });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          console.error('Auralis summary request failed:', res.status, detail);
+          throw new Error(res.status === 429
+            ? 'Le service est très sollicité. Réessaie dans un instant.'
+            : 'Cette fiche n’a pas pu être préparée. Réessaie dans un instant.');
+        }
+        const data = await res.json();
+        if (typeof data.summary !== 'string' || !data.summary.trim()) throw new Error('La fiche est vide. Réessaie.');
+        return data.summary.trim();
+      };
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Erreur lors de la génération du résumé');
+      // Cover each part of a long chapter instead of silently ignoring the end.
+      const segments: string[] = [];
+      const chapterText = chapter.text.trim();
+      for (let offset = 0; offset < chapterText.length;) {
+        let end = Math.min(offset + 11000, chapterText.length);
+        if (end < chapterText.length) {
+          const paragraphEnd = chapterText.lastIndexOf('\n\n', end);
+          if (paragraphEnd > offset + 6500) end = paragraphEnd + 2;
+        }
+        segments.push(chapterText.slice(offset, end));
+        offset = end;
       }
-
-      const data = await res.json();
-      const summaryText = data.summary;
+      if (segments.length > 24) throw new Error('Ce chapitre est trop long pour être analysé en une seule fiche.');
+      const notes: string[] = [];
+      for (const segment of segments) {
+        notes.push(await requestSummary(segment));
+      }
+      const summaryText = notes.length === 1 ? notes[0] : await requestSummary('', notes);
 
       const updatedBook: Book = {
         ...selectedBook,
