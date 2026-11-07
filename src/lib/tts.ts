@@ -416,11 +416,12 @@ export async function synthesizeChapter(
   // Avoid long Kokoro inference calls that time out behind Netlify's gateway.
   // Keep recognizing previous 720/480/1200-char divisions so older recorded
   // passages are never discarded on an existing chapter.
-  // 480 characters bounds each voice request, while still allowing resume
-  // of recordings split by older app versions at 360, 720 or 1200 chars.
-  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 480 : 900);
+  // Real DeepInfra integration smoke: 6/6 Kokoro WAVs of ~710 characters
+  // succeeded concurrently. Default to 720 chars: about half as many HTTP
+  // calls as the previous 360-char preview, while keeping old cache layouts.
+  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 720 : 900);
   const previousTinyChunks = chunkForSpeech(text, 360);
-  const previousFastChunks = chunkForSpeech(text, 720);
+  const previousSmallChunks = chunkForSpeech(text, 480);
   const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
     (cloudVoice || (provider === 'deepinfra' ? 'ff_siwis' : provider === 'aws-polly' ? 'Lea' : 'Kore'));
@@ -436,7 +437,7 @@ export async function synthesizeChapter(
   // Keep the original division for a chapter already in progress: never throw
   // away successful passages when upgrading from a previous preview.
   const chunks = hasMatches(previousTinyChunks) ? previousTinyChunks :
-    hasMatches(previousFastChunks) ? previousFastChunks :
+    hasMatches(previousSmallChunks) ? previousSmallChunks :
     hasMatches(legacyChunks) ? legacyChunks : fastChunks;
   const generated: Blob[] = new Array(chunks.length);
   let completed = 0;
