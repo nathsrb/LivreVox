@@ -159,7 +159,7 @@ async function synthesizeProviderSpeech(text: string, voice: string, credentials
   return synthesizeGemini(text, voice, credentials.apiKey);
 }
 
-async function generateTextWithProvider(prompt: string, credentials: ProviderCredentials): Promise<string> {
+async function generateTextWithProvider(prompt: string, credentials: ProviderCredentials, tokenLimit = 1600): Promise<string> {
   if (credentials.provider === 'aws-polly') {
     throw new Error('Amazon Polly est un service vocal uniquement. Utilise Gemini ou DeepInfra pour les résumés IA.');
   }
@@ -174,7 +174,7 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
         // Summaries need direct output, not the model's default lengthy reasoning.
         // This prevents reasoning tokens from consuming the output budget and time.
         reasoning_effort: 'none',
-        max_tokens: 1800,
+        max_tokens: tokenLimit,
         stream: false,
       }),
       // Respond before Netlify's observed ~30s gateway timeout so the UI can retry.
@@ -410,7 +410,22 @@ export default async function handler(request: Request): Promise<Response> {
     if (!chapterText.trim() && !summaryParts.length) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
-      const prompt = `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
+    const summaryMode = body.summaryMode === 'notes' ? 'notes' : 'final';
+      // Short, factual intermediate notes keep long chapters affordable and
+      // prevent expensive full-length summaries at every merge level.
+      const source = summaryParts.length
+        ? summaryParts.map((part, index) => 'PASSAGE ' + (index + 1) + ':\n' + part).join('\n\n')
+        : chapterText.slice(0, 14000);
+      const compactPrompt = `Extrais les informations essentielles du passage suivant pour construire une future fiche de lecture.
+Écris uniquement en français, sans mentionner les outils techniques.
+Sois fidèle au texte, n'invente rien. Préserve les faits, distinctions et conseils uniques, sans répétition.
+Pour la NON-FICTION : note l'objectif, les concepts importants et surtout CHAQUE action concrète, méthode ou exercice réellement cité avec son utilité. Distingue les déductions des consignes explicites.
+Pour la FICTION : note les actions, objectifs, obstacles, décisions et plans explicites des personnages, les rebondissements et les incertitudes. Ne révèle pas la suite.
+Réponds en listes brèves, avec 130 à 220 mots au maximum. Ne rédige pas encore la fiche complète.
+CHAPITRE : ${chapterTitle}
+TEXTE OU NOTES À COMPRESSER :
+${source}`;
+      const prompt = summaryMode === 'notes' ? compactPrompt : `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
 Lis le texte fourni, identifie si c'est une fiction ou une non-fiction et adapte le contenu.
 Ne parle jamais d'IA, de modèle, d'outil, de traitement ou de procédé technique.
 Écris en français naturel, clair et concret. Ne répète pas la même idée dans plusieurs sections.
@@ -449,7 +464,7 @@ ${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext
 SOURCE À ANALYSER :
 ${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`;
 
-      const summary = await generateTextWithProvider(prompt, credentials);
+      const summary = await generateTextWithProvider(prompt, credentials, summaryMode === 'notes' ? 650 : 1600);
       return respond({summary,provider});
     } catch(err) { const e=classifyError(err); return respond({error:e.error},e.status); }
   }
