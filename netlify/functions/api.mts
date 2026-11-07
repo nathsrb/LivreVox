@@ -169,11 +169,19 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
         model: env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
+        max_tokens: 1200,
+        stream: false,
       }),
+      signal: AbortSignal.timeout(26000),
     });
-    if (!response.ok) throw new Error(`DeepInfra texte ${response.status}: ${await response.text()}`);
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error(`DeepInfra résumé (${response.status}): ${detail}`);
+    }
     const payload = await response.json() as any;
-    return payload?.choices?.[0]?.message?.content || '';
+    const summary = payload?.choices?.[0]?.message?.content;
+    if (typeof summary !== 'string' || !summary.trim()) throw new Error('DeepInfra a renvoyé un résumé vide.');
+    return summary.trim();
   }
   const model = env('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash';
   const response = await fetch(
@@ -493,7 +501,7 @@ TITRE DU LIVRE : ${bookTitle || 'Livre audio'}
 TITRE DU CHAPITRE : ${chapterTitle || 'Chapitre'}
 ${previousChaptersContext ? `CONTEXTE DES CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
 CONTENU DU CHAPITRE :
-${chapterText.slice(0, 48000)}`;
+${chapterText.slice(0, 14000)}`;
 
       const summary = await generateTextWithProvider(prompt, credentials);
       return respond({summary,provider});
