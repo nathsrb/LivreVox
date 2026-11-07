@@ -77,7 +77,7 @@ import {
 } from './lib/tts';
 
 const KOKORO_VOICES: GeminiVoiceOption[] = [
-  { id: 'ff_siwis', label: 'Siwis · Français (Kokoro)', displayName: 'Siwis' },
+  { id: 'ff_siwis', label: 'Siwis · Français', displayName: 'Siwis' },
 ];
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -180,14 +180,7 @@ function isCloudGeneratedAudio(record: AudioRecord): boolean {
 }
 
 function audioSourceLabel(voiceId?: string): string {
-  if (!voiceId) return 'Audio non généré';
-  const separator = voiceId.indexOf(':');
-  const provider = separator >= 0 ? voiceId.slice(0, separator) : '';
-  const name = separator >= 0 ? voiceId.slice(separator + 1) : voiceId;
-  if (provider === 'gemini') return `Gemini · voix ${name}`;
-  if (provider === 'deepinfra') return `DeepInfra · voix ${name}`;
-  if (provider === 'aws-polly') return `Amazon Polly · voix ${name}`;
-  return `Audio généré · ${voiceId}`;
+  return voiceId ? 'Voix de lecture' : 'Audio non disponible';
 }
 
 function saveAs(blob: Blob, filename: string): void {
@@ -300,7 +293,7 @@ export default function AudiobookApp() {
         id: selected,
         label: selected,
         displayName: selected,
-        description: 'Voix Gemini personnalisée / bibliothèque étendue',
+        description: 'Voix personnalisée',
         type: 'custom',
       });
     }
@@ -630,7 +623,7 @@ export default function AudiobookApp() {
       await new Promise(resolve => setTimeout(resolve, 80));
     }
     setImportProgress(null);
-    if (status.status === 'complete') showToast('Livre audio cloud prêt : les chapitres sont stockés et streamables.');
+    if (status.status === 'complete') showToast('Ton livre audio est prêt : tu peux écouter tous les chapitres.');
     else if (status.status === 'password_protected') showToast('PDF protégé détecté : Auralis repasse automatiquement en traitement local sécurisé.', true);
     else if (status.status === 'text_ready' && !status.ttsConfigured) showToast("Texte prêt. L'écoute n'est pas disponible pour le moment.");
   }
@@ -1177,7 +1170,7 @@ export default function AudiobookApp() {
         }))
       );
       saveAs(zip, `${sanitizeFileName(selectedBook.title)} - Livre audio.zip`);
-      showToast('Livre audio exporté en ZIP.');
+      showToast('Ton livre audio est téléchargé.');
     } finally {
       setGeneration(null);
     }
@@ -1225,7 +1218,7 @@ export default function AudiobookApp() {
       setChapterId(next[0]?.chapters[0]?.id ?? '');
     }
     setDeleteTarget(null);
-    showToast(deleteTarget.cloudJobId ? 'Livre supprimé de cet appareil et du cloud.' : 'Livre supprimé de cet appareil.');
+    showToast(deleteTarget.cloudJobId ? 'Livre retiré de ta bibliothèque.' : 'Livre supprimé de cet appareil.');
   }
 
   return (
@@ -1575,7 +1568,7 @@ export default function AudiobookApp() {
                           <span className={`lv-player-mode-tag ${playableAudioUrl ? '' : 'instant'}`}>
                             <Volume2 size={12} />
                             {currentAudio ? audioSourceLabel(currentAudio.voiceId) :
-                              selectedChapter.audioUrl ? 'Audio distant (fournisseur non identifié)' :
+                              selectedChapter.audioUrl ? 'Livre audio prêt' :
                               'Audio non généré'}
                           </span>
                           <button
@@ -1835,7 +1828,7 @@ export default function AudiobookApp() {
                             setChapterId(chapter.id);
                             setTab('summary');
                           }}
-                          title="Consulter le résumé IA de cette section"
+                          title="Consulter la fiche de ce chapitre"
                         >
                           <Brain size={13} /> Fiche de lecture
                         </button>
