@@ -254,6 +254,9 @@ export default function AudiobookApp() {
   const passwordResolver = useRef<((password: string | null) => void) | null>(null);
 
   const [audioPlaying, setAudioPlaying] = useState(false);
+  const [audioPartIndex, setAudioPartIndex] = useState(0);
+  const pendingPartSeek = useRef<{ seconds: number; play: boolean } | null>(null);
+  const pendingChapterResume = useRef<{ bookId: string; chapterId: string; seconds: number } | null>(null);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isImmersiveOpen, setIsImmersiveOpen] = useState(false);
@@ -313,10 +316,12 @@ export default function AudiobookApp() {
   );
   const currentAudio =
     selectedBook && selectedChapter ? audioMap[selectedChapter.id] : undefined;
-  const audioUrl = useMemo(
-    () => (currentAudio ? URL.createObjectURL(currentAudio.blob) : ''),
-    [currentAudio]
-  );
+  const audioUrl = useMemo(() => {
+    const part = currentAudio?.parts?.[audioPartIndex] || currentAudio?.blob;
+    return part ? URL.createObjectURL(part) : '';
+  }, [currentAudio, audioPartIndex]);
+  const audioPartOffset = (currentAudio?.partDurations || [])
+    .slice(0, audioPartIndex).reduce((total, seconds) => total + seconds, 0);
   const generatedCount = selectedBook
     ? selectedBook.chapters.filter(chapter => audioMap[chapter.id] || chapter.audioUrl).length
     : 0;
@@ -414,6 +419,13 @@ export default function AudiobookApp() {
   }, [audioUrl]);
 
   useEffect(() => {
+    // Selecting another chapter returns to the beginning of its own playlist.
+    setAudioPartIndex(0);
+    pendingPartSeek.current = null;
+    setAudioCurrentTime(0);
+  }, [selectedBook?.id, selectedChapter?.id, currentAudio?.createdAt]);
+
+  useEffect(() => {
     void refreshGeminiVoiceData();
     void getCloudCapabilities().catch(() => undefined);
   }, []);
@@ -433,14 +445,15 @@ export default function AudiobookApp() {
   useEffect(() => {
     if (!audioPlaying || !selectedBook || !selectedChapter) return;
     const interval = setInterval(() => {
-      if (audioRef.current && audioRef.current.currentTime > 2) {
+      const absoluteTime = audioPartOffset + (audioRef.current?.currentTime || 0);
+      if (audioRef.current && absoluteTime > 2) {
         localStorage.setItem(
           'auralis_resume_state',
           JSON.stringify({
             bookId: selectedBook.id,
             chapterId: selectedChapter.id,
-            currentTime: Math.floor(audioRef.current.currentTime),
-            duration: Math.floor(audioRef.current.duration || 0),
+            currentTime: Math.floor(absoluteTime),
+            duration: Math.floor(currentAudio?.duration || audioRef.current.duration || 0),
             rate: settings.rate,
             bookTitle: selectedBook.title,
             chapterTitle: selectedChapter.title,
@@ -450,7 +463,7 @@ export default function AudiobookApp() {
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [audioPlaying, selectedBook?.id, selectedChapter?.id, settings.rate]);
+  }, [audioPlaying, selectedBook?.id, selectedChapter?.id, settings.rate, audioPartIndex, currentAudio?.duration]);
 
   // Support Media Session API (écran verrouillé et contrôles multimédias)
   useEffect(() => {
@@ -725,6 +738,8 @@ export default function AudiobookApp() {
   }
 
   function stopAllPlayback(): void {
+    setAudioPartIndex(0);
+    pendingPartSeek.current = null;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -741,28 +756,33 @@ export default function AudiobookApp() {
 
   function handleResume(): void {
     if (!resumeState) return;
-    const targetBook = books.find(b => b.id === resumeState.bookId);
+    const targetBook = books.find(book => book.id === resumeState.bookId);
     if (!targetBook) {
       setResumeState(null);
       localStorage.removeItem('auralis_resume_state');
       return;
     }
-    setSelectedId(targetBook.id);
-    const targetChapter = targetBook.chapters.find(c => c.id === resumeState.chapterId) || targetBook.chapters[0];
+    const targetChapter = targetBook.chapters.find(chapter => chapter.id === resumeState.chapterId) || targetBook.chapters[0];
     if (targetChapter) {
+      pendingChapterResume.current = {
+        bookId: targetBook.id, chapterId: targetChapter.id,
+        seconds: resumeState.currentTime,
+      };
+      setSelectedId(targetBook.id);
       setChapterId(targetChapter.id);
       setTab('listen');
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.currentTime = resumeState.currentTime;
-          audioRef.current.playbackRate = resumeState.rate || settings.rate;
-          void audioRef.current.play().catch(() => undefined);
-          setAudioPlaying(true);
+      // Already mounted audio may not emit another metadata event.
+      window.setTimeout(() => {
+        const pending = pendingChapterResume.current;
+        if (pending && pending.bookId === targetBook.id && pending.chapterId === targetChapter.id &&
+            audioRef.current && audioRef.current.readyState >= 1) {
+          pendingChapterResume.current = null;
+          seekTo(pending.seconds, true);
         }
       }, 350);
     }
     setResumeState(null);
-    showToast(`Reprise de « ${resumeState.chapterTitle} »`);
+    showToast('Reprise de « ' + resumeState.chapterTitle + ' »');
   }
 
   async function confirmDeleteChapter(): Promise<void> {
@@ -1001,18 +1021,34 @@ export default function AudiobookApp() {
   }
 
   function handleSkip(seconds: number): void {
-    if (playableAudioUrl && audioRef.current) {
-      const target = Math.max(0, Math.min(audioDuration, (audioRef.current.currentTime || 0) + seconds));
-      audioRef.current.currentTime = target;
-      setAudioCurrentTime(target);
-    }
+    seekTo(audioCurrentTime + seconds);
   }
 
-  function seekTo(target: number): void {
-    if (playableAudioUrl && audioRef.current) {
-      audioRef.current.currentTime = target;
-      setAudioCurrentTime(target);
+  function seekTo(target: number, autoStart = false): void {
+    if (!playableAudioUrl || !audioRef.current) return;
+    const total = currentAudio?.duration || audioDuration || 0;
+    const clamped = Math.max(0, Math.min(total, target));
+    const durations = currentAudio?.partDurations;
+    if (durations?.length && currentAudio?.parts?.length) {
+      let offset = 0;
+      let index = 0;
+      for (; index < durations.length - 1; index++) {
+        if (clamped < offset + durations[index]) break;
+        offset += durations[index];
+      }
+      const local = Math.max(0, Math.min(clamped - offset, Math.max(0, durations[index] - 0.05)));
+      if (index !== audioPartIndex) {
+        pendingPartSeek.current = { seconds: local, play: autoStart || audioPlaying };
+        setAudioPartIndex(index);
+      } else {
+        audioRef.current.currentTime = local;
+        if (autoStart) void audioRef.current.play().catch(() => undefined);
+      }
+    } else {
+      audioRef.current.currentTime = clamped;
+      if (autoStart) void audioRef.current.play().catch(() => undefined);
     }
+    setAudioCurrentTime(clamped);
   }
 
   function goToNextChapter(autoStart = false): void {
@@ -1083,6 +1119,8 @@ export default function AudiobookApp() {
         chapterId: chapter.id,
         voiceId: result.engineVoiceId,
         blob: result.blob,
+        parts: result.parts,
+        partDurations: result.partDurations,
         duration: result.duration,
         createdAt: Date.now(),
       };
@@ -2625,36 +2663,48 @@ export default function AudiobookApp() {
         </div>
       )}
 
-      {/* Lecteur cloud persistant : reste monté pendant la navigation, comme Spotify. */}
-                    <audio
-                      ref={audioRef}
-                      src={playableAudioUrl || undefined}
-                      style={{ display: 'none' }}
-                      onTimeUpdate={() => {
-                        if (audioRef.current) {
-                          setAudioCurrentTime(audioRef.current.currentTime);
-                          setAudioDuration(audioRef.current.duration || 0);
-                        }
-                      }}
-                      onLoadedMetadata={() => {
-                        if (audioRef.current) {
-                          setAudioDuration(audioRef.current.duration || 0);
-                          audioRef.current.playbackRate = settings.rate;
-                        }
-                      }}
-                      onPlay={() => {
-                        setAudioPlaying(true);
-                      }}
-                      onPause={() => {
-                        setAudioPlaying(false);
-                      }}
-                      onEnded={() => {
-                        setAudioPlaying(false);
-                        if (autoPlayNext) {
-                          goToNextChapter(true);
-                        }
-                      }}
-                    />
+      {/* Audio element persists while navigating and changes tracks only between long-part files. */}
+      <audio
+        ref={audioRef}
+        src={playableAudioUrl || undefined}
+        playsInline
+        preload="metadata"
+        style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+        onTimeUpdate={() => {
+          if (!audioRef.current) return;
+          setAudioCurrentTime(audioPartOffset + audioRef.current.currentTime);
+          setAudioDuration(currentAudio?.duration || audioRef.current.duration || 0);
+        }}
+        onLoadedMetadata={() => {
+          const audio = audioRef.current;
+          if (!audio) return;
+          audio.playbackRate = settings.rate;
+          setAudioDuration(currentAudio?.duration || audio.duration || 0);
+          const resume = pendingChapterResume.current;
+          if (resume && resume.bookId === selectedBook?.id && resume.chapterId === selectedChapter?.id) {
+            pendingChapterResume.current = null;
+            seekTo(resume.seconds, true);
+            return;
+          }
+          const pending = pendingPartSeek.current;
+          if (pending) {
+            pendingPartSeek.current = null;
+            audio.currentTime = Math.min(pending.seconds, Math.max(0, audio.duration - 0.05));
+            if (pending.play) void audio.play().catch(() => undefined);
+          }
+        }}
+        onPlay={() => setAudioPlaying(true)}
+        onPause={() => setAudioPlaying(false)}
+        onEnded={() => {
+          if (currentAudio?.parts && audioPartIndex + 1 < currentAudio.parts.length) {
+            pendingPartSeek.current = { seconds: 0, play: true };
+            setAudioPartIndex(index => index + 1);
+            return;
+          }
+          setAudioPlaying(false);
+          if (autoPlayNext) goToNextChapter(true);
+        }}
+      />
 
       {/* Barre de lecture fixe en bas d'écran (Sticky Docked Player) uniquement hors onglet lecteur */}
       {selectedBook && selectedChapter && tab !== 'listen' && (playableAudioUrl || audioPlaying) && !dockedDismissed && (
