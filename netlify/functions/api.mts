@@ -164,35 +164,68 @@ async function generateTextWithProvider(prompt: string, credentials: ProviderCre
     throw new Error('Amazon Polly est un service vocal uniquement. Utilise Gemini ou DeepInfra pour les résumés IA.');
   }
   if (credentials.provider === 'deepinfra') {
-    const response = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
-        // Summaries need direct output, not the model's default lengthy reasoning.
-        // This prevents reasoning tokens from consuming the output budget and time.
-        reasoning_effort: 'none',
-        max_tokens: tokenLimit,
-        stream: false,
-      }),
-      // Respond before Netlify's observed ~30s gateway timeout so the UI can retry.
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 500);
-      throw new Error(`DeepInfra résumé (${response.status}): ${detail}`);
+    const primaryModel = env('DEEPINFRA_TEXT_MODEL') || 'deepseek-ai/DeepSeek-V4.1-Flash-1017';
+    // Keep DeepSeek V4.1, but allow a second endpoint of the same model family
+    // when the primary responds with a transient 5xx or exhausted generation.
+    const alternateModel = 'deepseek-ai/DeepSeek-V4.1-Flash';
+    const deadline = Date.now() + 23500;
+    let lastError = 'Le service de lecture est temporairement indisponible.';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = deadline - Date.now();
+      if (remaining < 2500) break;
+      const model = attempt === 0 ? primaryModel : alternateModel;
+      try {
+        const response = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${credentials.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.2,
+            reasoning_effort: 'none',
+            max_tokens: Math.max(tokenLimit, attempt ? 2300 : 1800),
+            stream: false,
+          }),
+          // Always finish before the Netlify ~30-second gateway limit.
+          signal: AbortSignal.timeout(Math.min(19500, remaining - 700)),
+        });
+        if (!response.ok) {
+          // Do not expose provider details, API keys, or prompt text in user errors.
+          const upstreamStatus = response.status;
+          console.warn('[auralis-summary] upstream response', upstreamStatus, model);
+          lastError = upstreamStatus === 429
+            ? 'La création de la fiche est temporairement limitée par le service.'
+            : 'Le service de lecture est momentanément indisponible.';
+          if (upstreamStatus === 429 || (upstreamStatus >= 500 && upstreamStatus < 600)) continue;
+          throw new Error('La préparation de la fiche a été refusée (' + upstreamStatus + ').');
+        }
+        const payload = await response.json() as any;
+        const choice = payload?.choices?.[0];
+        const content = typeof choice?.message?.content === 'string' ? choice.message.content.trim() : '';
+        const finish = String(choice?.finish_reason || '');
+        if (content && finish === 'stop') return content;
+        if (finish === 'length' || finish === 'max_tokens') {
+          console.warn('[auralis-summary] output limit reached', model, 'tokens', tokenLimit);
+          lastError = 'La fiche demande davantage de détails. Une nouvelle tentative est nécessaire.';
+          // The second attempt uses a larger output budget.
+          continue;
+        }
+        if (!content) {
+          console.warn('[auralis-summary] empty response', model, finish);
+          lastError = 'Le service a renvoyé une fiche vide.';
+          continue;
+        }
+        if (finish === 'content_filter') throw new Error('Ce passage ne peut pas être préparé.');
+        // Some compatible backends omit finish_reason on otherwise complete responses.
+        if (!finish) return content;
+        lastError = 'La fiche n’a pas été terminée.';
+      } catch (error) {
+        if (error instanceof Error && /refusée|ne peut pas être préparé/.test(error.message)) throw error;
+        console.warn('[auralis-summary] retry after', error instanceof Error ? error.name : 'error');
+        lastError = 'La connexion a été interrompue pendant la création de la fiche.';
+      }
     }
-    const payload = await response.json() as any;
-    const choice = payload?.choices?.[0];
-    const summary = choice?.message?.content;
-    if (typeof summary !== 'string' || !summary.trim())
-      throw new Error('Le service a renvoyé une fiche vide.');
-    // An HTTP 200 can still contain a cut-off answer when the output budget is exhausted.
-    if (choice?.finish_reason === 'length' || choice?.finish_reason === 'max_tokens')
-      throw new Error('Fiche incomplète : la réponse s’est arrêtée avant la fin. Réessaie.');
-    return summary.trim();
+    throw new Error(lastError + ' Les étapes déjà enregistrées restent disponibles.');
   }
   const model = env('GEMINI_TEXT_MODEL') || 'gemini-3.8-flash';
   const response = await fetch(
@@ -506,9 +539,9 @@ ${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext
 SOURCE À ANALYSER :
 ${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`;
 
-      const tokenLimit = summaryMode === 'notes' ? 900
-        : summaryMode === 'overview' ? 1500
-        : summaryMode === 'actions' ? 2400 : 3000;
+      const tokenLimit = summaryMode === 'notes' ? 2200
+        : summaryMode === 'overview' ? 2600
+        : summaryMode === 'actions' ? 3400 : 3500;
       const summary = await generateTextWithProvider(prompt, credentials, tokenLimit);
       return respond({summary,provider});
     } catch(err) { const e=classifyError(err); return respond({error:e.error},e.status); }
