@@ -1,4 +1,4 @@
-import { zipSync } from 'fflate';
+import { Zip, ZipPassThrough } from 'fflate';
 import { chunkForSpeech, sanitizeFileName } from './text';
 import { getStoredProviderConfig } from './cloud';
 import { getSpeechSegments, saveSpeechSegment } from './storage';
@@ -483,25 +483,43 @@ export async function synthesizeChapter(
   return { blob: combinedBlob, duration, engineVoiceId };
 }
 
+/** Build a ZIP incrementally so exporting does not require a huge JS ArrayBuffer. */
 export async function makeBookZip(
   _title: string,
-  items: Array<{ index: number; title: string; blob: Blob }>
+  items: Array<{ index: number; title: string; blob: Blob; parts?: Blob[] }>
 ): Promise<Blob> {
-  const entries: Record<string, Uint8Array> = {};
-  for (const item of items) {
-    const prefix = String(item.index + 1).padStart(2, '0');
-    entries[`${prefix} - ${sanitizeFileName(item.title)}.wav`] = new Uint8Array(
-      await item.blob.arrayBuffer()
-    );
+  const chunks: Uint8Array[] = [];
+  let complete!: () => void;
+  let fail!: (reason: Error) => void;
+  const finished = new Promise<void>((resolve, reject) => { complete = resolve; fail = reject; });
+  const zip = new Zip((error, data, final) => {
+    if (error) { fail(error); return; }
+    if (data.length) chunks.push(data);
+    if (final) complete();
+  });
+  try {
+    for (const item of items) {
+      const prefix = String(item.index + 1).padStart(2, '0');
+      const parts = item.parts?.length ? item.parts : [item.blob];
+      for (let index = 0; index < parts.length; index++) {
+        const suffix = parts.length > 1 ? ' - Partie ' + String(index + 1).padStart(2, '0') : '';
+        const name = prefix + ' - ' + sanitizeFileName(item.title) + suffix + '.wav';
+        const file = new ZipPassThrough(name);
+        zip.add(file);
+        const part = parts[index];
+        const blockSize = 256 * 1024;
+        for (let offset = 0; offset < part.size; offset += blockSize) {
+          const data = new Uint8Array(await part.slice(offset, offset + blockSize).arrayBuffer());
+          file.push(data, offset + blockSize >= part.size);
+        }
+        if (!part.size) file.push(new Uint8Array(0), true);
+      }
+    }
+    zip.end();
+    await finished;
+    return new Blob(chunks, { type: 'application/zip' });
+  } catch (error) {
+    zip.terminate();
+    throw error;
   }
-  const zipped = zipSync(entries, { level: 0 });
-  return new Blob(
-    [
-      zipped.buffer.slice(
-        zipped.byteOffset,
-        zipped.byteOffset + zipped.byteLength
-      ) as ArrayBuffer,
-    ],
-    { type: 'application/zip' }
-  );
 }
