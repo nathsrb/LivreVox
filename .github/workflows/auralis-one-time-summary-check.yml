@@ -10,6 +10,7 @@ jobs:
     steps:
       - name: Test four real summary API calls against preview using synthetic text
         run: |
+          python3 - <<'PY'
           import json, sys, urllib.request, urllib.error
           url="https://deploy-preview-2--auralis-slnr.netlify.app/api/chapters/summary"
           notes = [
@@ -65,3 +66,4 @@ jobs:
               sys.exit(1)
           print("ALL FOUR SECTIONS PASSED")
           
+          PY
