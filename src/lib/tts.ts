@@ -391,8 +391,10 @@ export async function synthesizeChapter(
   // Avoid long Kokoro inference calls that time out behind Netlify's gateway.
   // Keep recognizing previous 720/480/1200-char divisions so older recorded
   // passages are never discarded on an existing chapter.
-  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 360 : 900);
-  const previousFastChunks = chunkForSpeech(text, 720);
+  const fastChunks = chunkForSpeech(text, provider === 'deepinfra' ? 720 : 900);
+  // Only retain the 360-character layout when it already contains saved work.
+  // Otherwise it needlessly doubles the request count for a 33k-word chapter.
+  const previousTinyChunks = chunkForSpeech(text, 360);
   const previousChunks = chunkForSpeech(text, 480);
   const legacyChunks = chunkForSpeech(text, 1200);
   const engineVoiceId = provider + ':' +
@@ -408,7 +410,7 @@ export async function synthesizeChapter(
     availableSegments.get(index)?.textHash === textFingerprint(passage));
   // Keep the original division for a chapter already in progress: never throw
   // away successful passages when upgrading from a previous preview.
-  const chunks = hasMatches(previousFastChunks) ? previousFastChunks :
+  const chunks = hasMatches(previousTinyChunks) ? previousTinyChunks :
     hasMatches(previousChunks) ? previousChunks :
     hasMatches(legacyChunks) ? legacyChunks : fastChunks;
   const generated: Blob[] = new Array(chunks.length);
