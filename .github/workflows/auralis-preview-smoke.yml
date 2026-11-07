@@ -1,0 +1,33 @@
+name: Auralis preview summary smoke
+on:
+  push:
+    branches:
+      - fix/auralis-api-chapter-detection
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check chapter summary endpoint (non-sensitive synthetic text)
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://deploy-preview-2--auralis-slnr.netlify.app/api/chapters/summary"
+          PAYLOAD='{"provider":"deepinfra","summaryMode":"notes","bookTitle":"Livre de test","chapterTitle":"Une méthode simple","chapterText":"Ce chapitre explique comment construire une méthode de lecture. Premièrement identifier un objectif précis. Deuxièmement noter les obstacles et choisir une première action. Troisièmement pratiquer pendant quinze minutes chaque jour et évaluer ses progrès. Il faut éviter de confondre l objectif et les moyens utilisés pour y arriver."}'
+          STATUS=$(curl -sS --max-time 55 -o /tmp/auralis-response.json -w '%{http_code}' -H 'Content-Type: application/json' -X POST --data "$PAYLOAD" "$URL")
+          echo "HTTP: $STATUS"
+          python3 - <<'PY'
+          import json
+          p='/tmp/auralis-response.json'
+          try:
+              data=json.load(open(p))
+              if 'summary' in data:
+                  print('Summary length:',len(data['summary']))
+                  print('Summary excerpt:',data['summary'][:220])
+              else:
+                  print('Service error:',str(data.get('error','unknown'))[:700])
+          except Exception as e: print('Invalid response:',str(e)[:200])
+          PY
+          test "$STATUS" = 200
