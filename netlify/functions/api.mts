@@ -303,25 +303,6 @@ async function synthesizeSpeech(
 
 
 
-const voicesFeatured =  [
-    ['Zephyr', 'Bright'], ['Puck', 'Upbeat'], ['Charon', 'Informative'],
-    ['Kore', 'Firm'], ['Fenrir', 'Excitable'], ['Leda', 'Youthful'],
-    ['Orus', 'Firm'], ['Aoede', 'Breezy'], ['Callirrhoe', 'Easy-going'],
-    ['Autonoe', 'Bright'], ['Enceladus', 'Breathy'], ['Iapetus', 'Clear'],
-    ['Umbriel', 'Easy-going'], ['Algieba', 'Smooth'], ['Despina', 'Smooth'],
-    ['Erinome', 'Clear'], ['Algenib', 'Gravelly'], ['Rasalgethi', 'Informative'],
-    ['Laomedeia', 'Upbeat'], ['Achernar', 'Soft'], ['Alnilam', 'Firm'],
-    ['Schedar', 'Even'], ['Gacrux', 'Mature'], ['Pulcherrima', 'Forward'],
-    ['Achird', 'Friendly'], ['Zubenelgenubi', 'Casual'], ['Vindemiatrix', 'Gentle'],
-    ['Sadachbia', 'Lively'], ['Sadaltager', 'Knowledgeable'], ['Sulafat', 'Warm'],
-  ].map(([id, description]) => ({
-    id,
-    name: id,
-    displayName: id,
-    description,
-    type: 'prebuilt',
-  }));
-
 type Body = Record<string, any>;
 function configured(provider: ProviderName, request: Request, body: Body = {}) {
   const apiKey = String((provider === 'deepinfra' ? env('DEEPINFRA_API_KEY') : '') || body.apiKey || header(request,'x-api-key') || header(request,'x-gemini-api-key') || (
@@ -415,10 +396,13 @@ export default async function handler(request: Request): Promise<Response> {
     if (provider === 'aws-polly') return respond({error:'Amazon Polly ne produit pas de résumé. Utilise Gemini ou DeepInfra.'},400);
     if (!credentials.apiKey) return respond({error:'Clé API du fournisseur manquante dans Netlify.'},503);
     const chapterText = typeof body.chapterText === 'string' ? body.chapterText : '';
+    const summaryParts: string[] = Array.isArray(body.summaryParts)
+      ? body.summaryParts.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0).slice(0, 24)
+      : [];
     const chapterTitle = typeof body.chapterTitle === 'string' ? body.chapterTitle.slice(0,250) : '';
     const bookTitle = typeof body.bookTitle === 'string' ? body.bookTitle.slice(0,250) : '';
     const previousChaptersContext = typeof body.previousChaptersContext === 'string' ? body.previousChaptersContext.slice(0,12000) : '';
-    if (!chapterText.trim()) return respond({error:'Texte du chapitre requis.'},400);
+    if (!chapterText.trim() && !summaryParts.length) return respond({error:'Texte du chapitre requis.'},400);
     try {
 
       const prompt = `Tu rédiges une fiche de lecture précise, agréable à lire et directement utile.
@@ -457,8 +441,8 @@ Garde exactement les titres ### indiqués pour le type de livre retenu. Utilise 
 LIVRE : ${bookTitle || 'Livre'}
 CHAPITRE : ${chapterTitle || 'Chapitre'}
 ${previousChaptersContext ? `CHAPITRES PRÉCÉDENTS :\n${previousChaptersContext}\n` : ''}
-TEXTE DU CHAPITRE :
-${chapterText.slice(0, 14000)}`;
+SOURCE À ANALYSER :
+${summaryParts.length ? 'Ces notes couvrent toutes les parties du chapitre dans l’ordre. Fusionne-les sans répétitions, conserve toutes les actions distinctes et n’ajoute rien d’extérieur.\n' + summaryParts.map((part, index) => 'PARTIE ' + (index + 1) + '\n' + part).join('\n\n') : chapterText.slice(0, 14000)}`;
 
       const summary = await generateTextWithProvider(prompt, credentials);
       return respond({summary,provider});
