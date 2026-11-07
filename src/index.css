@@ -1608,3 +1608,380 @@ button:disabled {
 }
 
 
+
+
+
+/* ============================================================
+   AURALIS / ÉDITION NOCTURNE — Design System V1
+   Visual-only layer. Preserve every API, handler, audio and PDF flow.
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --ink: #101a24;
+  --ink-deep: #0b141d;
+  --paper: #f2ebdd;
+  --copper: #c18456;
+  --copper-bright: #dda477;
+  --sage: #8f9f92;
+  --graphite: #26333b;
+  --muted: #b6b8b3;
+  --line: rgba(242,235,221,.13);
+  --surface: #18252e;
+  color: var(--paper);
+  background: var(--ink-deep);
+  font-family: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+  font-synthesis: none;
+}
+html, body, #root {
+  background: var(--ink-deep);
+  color: var(--paper);
+}
+body { line-height: 1.5; }
+button, input, select, textarea { font-family: 'Manrope', ui-sans-serif, system-ui, sans-serif; }
+button { transition: background-color .18s ease, border-color .18s ease, color .18s ease, box-shadow .18s ease, transform .18s ease; }
+button:focus-visible, a:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
+  outline: 2px solid var(--copper-bright);
+  outline-offset: 3px;
+}
+::selection { background: rgba(193,132,86,.37); color: var(--paper); }
+
+.lv-app {
+  grid-template-columns: 252px minmax(0,1fr);
+  color: var(--paper);
+  background:
+    radial-gradient(ellipse at 98% 4%, rgba(193,132,86,.08), transparent 40%),
+    linear-gradient(120deg, #101a24 0%, #0d1821 100%);
+}
+.lv-sidebar {
+  background: #111d25;
+  border-right: 1px solid rgba(218,176,128,.17);
+  box-shadow: inset -1px 0 rgba(5,12,17,.4);
+  padding: 29px 17px 22px;
+  backdrop-filter: none;
+  gap: 25px;
+}
+.lv-brand { padding: 4px 6px 12px; gap: 13px; }
+.lv-logo, .lv-mobile-brand {
+  border: 1px solid rgba(218,176,128,.55);
+  background: linear-gradient(150deg,#34414a,#101a24 70%);
+  color: var(--copper-bright);
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 8px 19px rgba(0,0,0,.2);
+  border-radius: 9px;
+}
+.lv-brand strong {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 29px;
+  font-weight: 600;
+  letter-spacing: .095em;
+  line-height: .98;
+  color: var(--paper);
+}
+.lv-brand small {
+  color: var(--sage);
+  font-size: 10px;
+  letter-spacing: .055em;
+  margin-top: 6px;
+}
+.lv-section-label {
+  color: #a6aca7;
+  letter-spacing: .18em;
+  font-size: 10px;
+  font-weight: 800;
+}
+.lv-books { gap: 4px; }
+.lv-book-item {
+  border-radius: 7px;
+  color: #cacbc5;
+  padding: 10px 8px;
+}
+.lv-book-item:hover, .lv-chapter-row:hover { background: rgba(242,235,221,.055); }
+.lv-book-item.active, .lv-chapter-row.active {
+  background: rgba(193,132,86,.12);
+  border-color: rgba(193,132,86,.38);
+  color: var(--paper);
+}
+.lv-book-cover, .lv-big-cover, .lv-player-cover {
+  background:
+    linear-gradient(90deg,rgba(0,0,0,.25) 0 9%,transparent 9% 100%),
+    radial-gradient(circle at 70% 18%,rgba(201,157,110,.18),transparent 40%),
+    linear-gradient(145deg,#33454a,#15252b 72%);
+  border: 1px solid rgba(210,158,105,.44);
+  color: var(--paper);
+  border-radius: 4px 9px 9px 4px;
+  box-shadow: 4px 7px 15px rgba(0,0,0,.24), inset 3px 0 0 rgba(0,0,0,.18);
+}
+.lv-book-copy strong { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 17px; font-weight: 600; }
+.lv-book-copy span, .lv-empty-library { color: #a3aaa5; font-size: 11px; }
+.lv-private-card {
+  background: rgba(143,159,146,.09);
+  border-color: rgba(143,159,146,.24);
+  color: #b9cbbb;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.lv-main { background: transparent; }
+.lv-topbar {
+  height: 78px;
+  background: rgba(15,25,33,.96);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+  padding: 0 36px;
+}
+.lv-topbar-title strong { color: var(--paper); font-size: 14px; font-weight: 650; }
+.lv-topbar-title span { color: var(--sage); font-size: 11px; }
+.lv-content { width: min(1390px,100%); padding: 42px clamp(22px,3.5vw,56px); }
+.lv-icon-button, .lv-secondary, .lv-ghost, .lv-mini-button, .lv-rate,
+.lv-input, .lv-select {
+  border: 1px solid rgba(242,235,221,.19);
+  background: #1b2a32;
+  color: var(--paper);
+  box-shadow: none;
+}
+.lv-icon-button, .lv-mini-button { border-radius: 8px; }
+.lv-secondary, .lv-ghost { border-radius: 7px; font-size: 12px; }
+.lv-icon-button:hover, .lv-secondary:hover, .lv-ghost:hover, .lv-mini-button:hover {
+  background: #293941; border-color: rgba(193,132,86,.54);
+}
+.lv-primary, .lv-hero-cta {
+  background: linear-gradient(110deg,#c18456,#ae7148);
+  color: #151c20;
+  font-weight: 800;
+  border: 1px solid #d09b6d;
+  border-radius: 7px;
+  box-shadow: 0 10px 24px rgba(0,0,0,.18), inset 0 1px rgba(255,246,229,.3);
+}
+.lv-primary:hover, .lv-hero-cta:hover {
+  background: #d9a076;
+  border-color: #e6b389;
+  box-shadow: 0 12px 28px rgba(0,0,0,.24);
+  filter: none;
+}
+.lv-badge, .lv-status-pill {
+  background: rgba(143,159,146,.11);
+  border-color: rgba(143,159,146,.32);
+  color: #c2d1c5;
+}
+.lv-hero { width: min(860px,100%); position: relative; }
+.lv-hero::before {
+  content: 'AURALIS  /  LE LIVRE, EN VOIX';
+  display: block;
+  width: fit-content;
+  margin: 0 auto 22px;
+  font-family: 'Manrope', sans-serif;
+  letter-spacing: .25em;
+  color: var(--copper-bright);
+  font-size: 10px;
+  font-weight: 800;
+}
+.lv-hero h1 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: clamp(54px,7vw,94px);
+  font-weight: 500;
+  letter-spacing: -.035em;
+  line-height: .96;
+  max-width: 860px;
+}
+.lv-hero h1 em {
+  color: var(--copper-bright);
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  font-style: italic;
+}
+.lv-hero p { color: #c2c6c0; font-size: 15px; line-height: 1.8; max-width: 590px; }
+.lv-drop {
+  border: 1px dashed rgba(213,166,116,.55);
+  border-radius: 8px;
+  background: repeating-linear-gradient(0deg,transparent 0 31px,rgba(255,255,255,.012) 31px 32px), #182630;
+  box-shadow: inset 0 0 0 6px rgba(12,22,29,.4), 0 22px 52px rgba(0,0,0,.19);
+  padding: 39px 26px;
+}
+.lv-drop.dragging { background: #27353a; border-color: var(--copper-bright); }
+.lv-drop-icon { border-radius: 50%; background: #293b3b; border: 1px solid rgba(193,132,86,.46); color: var(--copper-bright); }
+.lv-drop strong { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 25px; font-weight: 600; }
+.lv-drop span { color: var(--muted); font-size: 12px; }
+.lv-features { gap: 12px; margin-top: 18px; }
+.lv-feature {
+  background: rgba(38,51,59,.57);
+  border-color: var(--line);
+  color: #bbc2ba;
+  border-radius: 6px;
+  padding: 19px;
+  line-height: 1.65;
+}
+.lv-feature strong { color: var(--paper); font-size: 13px; font-weight: 750; }
+.lv-feature svg { color: var(--copper-bright); }
+
+.lv-book-header { margin-bottom: 29px; }
+.lv-big-cover { border-radius: 4px 10px 10px 4px; width: 80px; height: 111px; }
+.lv-book-heading h1, .lv-reading-top h2, .lv-export-hero h2,
+.lv-summary-hero-copy h2, .lv-modal h2, .lv-immersive-meta h2 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -.025em;
+  color: var(--paper);
+}
+.lv-book-heading h1 { font-size: clamp(32px,4vw,52px); line-height: 1; }
+.lv-meta { color: #abb3ab; font-size: 12px; }
+.lv-tabs { border-bottom-color: var(--line); gap: 17px; }
+.lv-tab { color: #abb3ac; font-size: 12px; font-weight: 700; border-bottom-width: 2px; padding: 13px 8px; }
+.lv-tab:hover { color: var(--paper); }
+.lv-tab.active { color: var(--copper-bright); border-bottom-color: var(--copper); }
+.lv-card, .lv-player-card, .lv-summary-content {
+  background: #18252e;
+  border-color: rgba(242,235,221,.13);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(3,11,16,.14);
+}
+.lv-reader { grid-template-columns: minmax(245px,310px) minmax(0,1fr); gap: 22px; }
+.lv-chapter-list { padding: 11px; }
+.lv-chapter-row { border-radius: 6px; color: #c6cbc5; }
+.lv-chapter-num { border-radius: 5px; color: var(--copper-bright); background: #2d393b; }
+.lv-chapter-row strong { color: var(--paper); font-size: 12px; }
+.lv-chapter-row span { color: #abb3ac; }
+.lv-reading-card { padding: clamp(21px,3vw,37px); min-height: 470px; }
+.lv-reading-top h2 { font-size: 31px; }
+.lv-reading-top p { color: var(--muted); }
+.lv-text, .lv-immersive-reader {
+  color: #e4dfd4;
+  line-height: 1.95;
+  font-size: 15.5px;
+}
+.lv-text { max-width: 72ch; }
+.lv-player, .lv-player-card { background: #1c2a33; border-color: rgba(193,132,86,.3); }
+.lv-player-card { padding: 23px; gap: 18px; }
+.lv-player-titles strong { color: var(--paper); font-family: 'Cormorant Garamond', Georgia, serif; font-size: 21px; }
+.lv-player-titles small, .lv-player-label { color: var(--muted); }
+.lv-round:not(.subtle), .lv-ctrl-btn-play {
+  background: var(--copper);
+  border: 1px solid #e0aa78;
+  color: #16212a;
+  box-shadow: 0 9px 22px rgba(0,0,0,.26);
+}
+.lv-round.subtle, .lv-ctrl-btn {
+  background: #2b3a40;
+  border: 1px solid rgba(242,235,221,.15);
+  color: var(--paper);
+}
+.lv-ctrl-btn:hover:not(:disabled) { background: #36474a; transform: translateY(-1px); }
+.lv-ctrl-btn-play:hover:not(:disabled) { background: #dba074; color: #14202a; transform: translateY(-1px); }
+.lv-progress-track { background: #354148; }
+.lv-progress-fill { background: linear-gradient(90deg,var(--copper),#e7b992); }
+.lv-rate { border-radius: 6px; background: #26353c; font-size: 12px; }
+.lv-audio, input[type="range"], input[type="checkbox"] { accent-color: var(--copper); }
+.lv-stat, .lv-info-card {
+  background: #1a2931;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.lv-stat strong { font-family: 'Cormorant Garamond', Georgia, serif; font-size: 26px; color: var(--paper); }
+.lv-stat span, .lv-info-card p { color: #b7beb6; }
+.lv-info-card h3 { color: var(--paper); }
+.lv-export-hero, .lv-summary-hero {
+  background: linear-gradient(130deg,#24343c,#16252e 75%);
+  border: 1px solid rgba(193,132,86,.26);
+  border-radius: 8px;
+}
+.lv-export-hero h2, .lv-summary-hero-copy h2 { font-size: 30px; }
+.lv-export-hero p, .lv-summary-hero-copy p { color: #bbc4bc; font-size: 12px; }
+.lv-summary-content { max-width: 88ch; padding: clamp(22px,3.5vw,42px); }
+.lv-summary-content h3, .lv-summary-section h3 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--copper-bright);
+  line-height: 1.18;
+}
+.lv-summary-content strong { color: var(--paper); }
+.lv-summary-highlight-box {
+  border-left: 3px solid var(--copper);
+  background: rgba(193,132,86,.08);
+  padding: 16px 19px;
+}
+.lv-table-row { border-bottom-color: var(--line); }
+.lv-table-row strong { color: var(--paper); }
+.lv-table-row span { color: #a8b2ab; }
+.lv-spinner { border-color: #34464b; border-top-color: var(--copper); }
+.lv-import-overlay, .lv-modal-wrap { background: rgba(4,11,16,.84); }
+.lv-modal, .lv-import-box { background: #1b2932; border: 1px solid rgba(193,132,86,.26); }
+.lv-modal h2 { font-size: 32px; }
+.lv-modal p, .lv-import-box p { color: #c0c6bd; font-size: 12px; }
+.lv-field label { color: #d6d5ca; font-size: 12px; }
+.lv-input, .lv-select { background: #101d26; border-radius: 6px; font-size: 14px; }
+.lv-input:focus, .lv-select:focus {
+  border-color: var(--copper);
+  box-shadow: 0 0 0 3px rgba(193,132,86,.17);
+}
+.lv-check { color: #c8cec5; font-size: 12px; }
+.lv-settings-modal { scrollbar-color: var(--copper) #1a2932; }
+.lv-settings-modal::-webkit-scrollbar-track { background: #1a2932; }
+.lv-settings-modal::-webkit-scrollbar-thumb { background: var(--copper); border-color: #1a2932; }
+.lv-toast { background: #23323b; border-color: rgba(193,132,86,.4); color: var(--paper); border-radius: 8px; font-size: 12px; }
+.lv-docked-player {
+  background: rgba(19,31,39,.97);
+  border-top: 1px solid rgba(193,132,86,.4);
+  backdrop-filter: blur(22px);
+}
+.lv-immersive-overlay {
+  background:
+    radial-gradient(ellipse at 50% 10%,rgba(193,132,86,.13),transparent 42%),
+    #0c1720;
+  color: var(--paper);
+}
+.lv-immersive-artwork {
+  border-radius: 8px;
+  border: 1px solid rgba(193,132,86,.56);
+  background:
+    linear-gradient(90deg,rgba(0,0,0,.22) 0 8%,transparent 8%),
+    linear-gradient(145deg,#3b4a4a,#15252d 78%);
+  color: var(--copper-bright);
+  box-shadow: 0 20px 50px rgba(0,0,0,.4);
+}
+.lv-immersive-artwork-glow { background: radial-gradient(circle,rgba(193,132,86,.12),transparent 70%); }
+.lv-immersive-meta h2 { font-size: clamp(34px,5vw,50px); }
+.lv-immersive-meta p { color: #b7bfb7; }
+.lv-immersive-reader { background: #172630; border: 1px solid var(--line); border-radius: 8px; }
+.lv-paragraph-item.active { background: rgba(193,132,86,.12); border-left-color: var(--copper); }
+.lv-resume-banner {
+  background: #26343b;
+  border: 1px solid rgba(193,132,86,.34);
+  border-radius: 7px;
+  box-shadow: 0 10px 26px rgba(0,0,0,.18);
+}
+.lv-resume-icon { background: rgba(193,132,86,.15); color: var(--copper-bright); }
+.lv-resume-text strong { color: var(--paper); }
+.lv-resume-text span { color: #b7c0b7; }
+.lv-chapter-badge.playing { background: rgba(193,132,86,.17); color: #e5b78d; border-color: rgba(193,132,86,.45); }
+
+@media (min-width: 901px) {
+  .lv-docked-player { left: 252px; }
+}
+@media (max-width: 900px) {
+  .lv-app { grid-template-columns: 1fr; }
+  .lv-sidebar { display: none; }
+  .lv-topbar { height: 66px; padding: 0 18px; }
+  .lv-content { padding: 24px 17px 100px; }
+  .lv-mobile-brand { border-radius: 7px; }
+  .lv-hero h1 { font-size: clamp(48px,10vw,75px); }
+  .lv-reader { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .lv-hero::before { font-size: 9px; letter-spacing: .12em; }
+  .lv-hero h1 { font-size: clamp(46px,12vw,65px); }
+  .lv-hero p { font-size: 14px; }
+  .lv-drop { padding: 27px 15px; }
+  .lv-features { grid-template-columns: 1fr; }
+  .lv-book-heading h1 { font-size: 30px; }
+  .lv-big-cover { width: 55px; height: 78px; }
+  .lv-reading-card { padding: 20px; }
+  .lv-text { font-size: 15px; }
+  .lv-summary-content { padding: 20px; }
+  .lv-summary-content h3 { font-size: 22px; }
+  .lv-ctrl-btn { min-width: 38px; }
+  .lv-ctrl-btn-play { min-width: 52px; }
+  .lv-modal-actions > button { min-height: 42px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
