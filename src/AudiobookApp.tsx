@@ -934,8 +934,6 @@ export default function AudiobookApp() {
         return result;
       };
 
-      let summaryText: string;
-      let isProvisional = false;
       let finalText = source;
       let finalParts: string[] | undefined;
 
