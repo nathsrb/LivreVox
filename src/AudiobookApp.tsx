@@ -469,9 +469,10 @@ export default function AudiobookApp() {
   }, [audioUrl]);
 
   useEffect(() => {
-    // Selecting another chapter returns to the beginning of its own playlist.
+    // Keep a pending autoplay request while switching chapters. Only clear
+    // a pending seek when the audio part itself has not changed.
     setAudioPartIndex(0);
-    pendingPartSeek.current = null;
+    if (!pendingPartSeek.current?.play) pendingPartSeek.current = null;
     setAudioCurrentTime(0);
   }, [selectedBook?.id, selectedChapter?.id, currentAudio?.createdAt]);
 
@@ -858,6 +859,23 @@ export default function AudiobookApp() {
     }
     setDeleteChapterTarget(null);
     showToast(`Chapitre « ${target.title} » supprimé.`);
+  }
+
+  function openChapterPlayer(chapter: Chapter, startPlayback = false): void {
+    // A multipart recording is one logical audiobook chapter in the player.
+    // Its WAV parts are played consecutively by the audio onEnded handler.
+    const sameChapter = selectedChapter?.id === chapter.id;
+    setChapterId(chapter.id);
+    setTab('listen');
+    setDockedDismissed(false);
+    if (!startPlayback) return;
+    if (sameChapter && playableAudioUrl && audioRef.current) {
+      void audioRef.current.play().catch(() => undefined);
+    } else {
+      // The audio source changes after React selects the chapter. Playback
+      // must wait for the first part to finish loading.
+      pendingPartSeek.current = { seconds: 0, play: true };
+    }
   }
 
   function togglePlayPause(): void {
@@ -1428,6 +1446,12 @@ export default function AudiobookApp() {
       await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
       setAudioMap(current => ({ ...current, [chapter.id]: record }));
       setCachedAudioPassages(current => ({ ...current, [chapter.id]: 0 }));
+      // Reveal the Spotify-style player as soon as a chapter is ready.
+      // Do not auto-play audio without a user playback gesture.
+      setChapterId(chapter.id);
+      setTab('listen');
+      setDockedDismissed(false);
+      showToast(`Chapitre « ${chapter.title} » prêt à écouter dans Auralis.`);
       return record;
     } catch (error) {
       showToast(
@@ -2417,21 +2441,27 @@ export default function AudiobookApp() {
                           <span>{chapter.words} mots</span>
                         </div>
                         <span>
-                          {chapter.audioUrl ? 'Audio cloud prêt' : audioMap[chapter.id] ? audioSourceLabel(audioMap[chapter.id].voiceId) : cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
+                          {chapter.audioUrl ? 'Prêt à écouter' : audioMap[chapter.id] ? 'Prêt à écouter' : cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
                         </span>
                         <div className="lv-table-actions">
-                          {chapter.audioUrl ? (
-                            <a className="lv-mini-button" title="Ouvrir l’audio cloud" href={chapter.audioUrl} target="_blank" rel="noreferrer"><Play size={14} /></a>
-                          ) : audioMap[chapter.id] ? (
+                          {chapter.audioUrl || audioMap[chapter.id] ? (
                             <>
                               <button
+                                className="lv-mini-button"
+                                title="Écouter le chapitre dans le lecteur Auralis"
+                                aria-label={`Écouter ${chapter.title}`}
+                                onClick={() => openChapterPlayer(chapter, true)}
+                              >
+                                <Play size={14} />
+                              </button>
+                              {audioMap[chapter.id] && <button
                                 className="lv-mini-button"
                                 title={audioMap[chapter.id].parts?.length ? 'Télécharger toutes les parties audio' : 'Télécharger le chapitre'}
                                 onClick={() => void downloadChapter(audioMap[chapter.id], chapter.title, index)}
                               >
                                 <Download size={14} />
-                              </button>
-                              <button
+                              </button>}
+                              {audioMap[chapter.id] && <button
                                 className="lv-mini-button"
                                 title="Supprimer l’audio"
                                 onClick={() =>
@@ -2439,7 +2469,7 @@ export default function AudiobookApp() {
                                 }
                               >
                                 <Trash2 size={14} />
-                              </button>
+                              </button>}
                             </>
                           ) : (
                             <button
