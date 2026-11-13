@@ -47,6 +47,7 @@ import {
   splitIntoChapters,
 } from './lib/text';
 import { extractPdf, renderPdfPageImage } from './lib/pdf';
+import { prepareAudioForMobile } from './lib/mobileAudio';
 import {
   CLOUD_THRESHOLD_BYTES,
   deleteCloudJob,
@@ -269,6 +270,9 @@ export default function AudiobookApp() {
   const [audioPartIndex, setAudioPartIndex] = useState(0);
   const pendingPartSeek = useRef<{ seconds: number; play: boolean } | null>(null);
   const pendingChapterResume = useRef<{ bookId: string; chapterId: string; seconds: number } | null>(null);
+  const playbackWanted = useRef(false);
+  const playbackRetryTimer = useRef<number | null>(null);
+  const playbackRetries = useRef(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isImmersiveOpen, setIsImmersiveOpen] = useState(false);
@@ -454,12 +458,20 @@ export default function AudiobookApp() {
     }
     if (!selectedBook.chapters.some(chapter => chapter.id === chapterId))
       setChapterId(selectedBook.chapters[0]?.id ?? '');
+    let cancelled = false;
     void getBookAudio(selectedBook.id).then(async records => {
       const previousLocalAudio = records.filter(record => !isCloudGeneratedAudio(record));
       await Promise.all(previousLocalAudio.map(record => deleteAudio(record.bookId, record.chapterId))).catch(() => undefined);
       const allowed = records.filter(isCloudGeneratedAudio);
-      setAudioMap(Object.fromEntries(allowed.map(record => [record.chapterId, record])));
-    });
+      const playable = await Promise.all(allowed.map(record =>
+        prepareAudioForMobile(record).catch(error => {
+          console.warn('Auralis: unable to prepare mobile audio:', error);
+          return record;
+        })
+      ));
+      if (!cancelled) setAudioMap(Object.fromEntries(playable.map(record => [record.chapterId, record])));
+    }).catch(error => console.warn('Auralis: unable to load saved audio:', error));
+    return () => { cancelled = true; };
   }, [selectedBook?.id]);
 
   useEffect(() => {
@@ -468,11 +480,29 @@ export default function AudiobookApp() {
     };
   }, [audioUrl]);
 
+  // Retry at most once per source; each WAV part starts with a clean budget.
+  useEffect(() => {
+    playbackRetries.current = 0;
+    if (playbackRetryTimer.current !== null) {
+      window.clearTimeout(playbackRetryTimer.current);
+      playbackRetryTimer.current = null;
+    }
+    return () => {
+      if (playbackRetryTimer.current !== null) {
+        window.clearTimeout(playbackRetryTimer.current);
+        playbackRetryTimer.current = null;
+      }
+    };
+  }, [playableAudioUrl]);
+
   useEffect(() => {
     // Keep a pending autoplay request while switching chapters. Only clear
     // a pending seek when the audio part itself has not changed.
     setAudioPartIndex(0);
-    if (!pendingPartSeek.current?.play) pendingPartSeek.current = null;
+    if (!pendingPartSeek.current?.play) {
+      pendingPartSeek.current = null;
+      playbackWanted.current = false;
+    }
     setAudioCurrentTime(0);
   }, [selectedBook?.id, selectedChapter?.id, currentAudio?.createdAt]);
 
@@ -526,9 +556,10 @@ export default function AudiobookApp() {
         album: selectedBook.title,
       });
       navigator.mediaSession.setActionHandler('play', () => {
-        void audioRef.current?.play().catch(() => undefined);
+        requestAudioPlayback();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        playbackWanted.current = false;
         audioRef.current?.pause();
       });
       navigator.mediaSession.setActionHandler('seekbackward', () => {
@@ -563,6 +594,7 @@ export default function AudiobookApp() {
       setSleepRemainingSeconds(prev => {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
+          playbackWanted.current = false;
           if (audioRef.current) audioRef.current.pause();
           setAudioPlaying(false);
           setSleepTimerMinutes(null);
@@ -789,6 +821,11 @@ export default function AudiobookApp() {
   }
 
   function stopAllPlayback(): void {
+    playbackWanted.current = false;
+    if (playbackRetryTimer.current !== null) {
+      window.clearTimeout(playbackRetryTimer.current);
+      playbackRetryTimer.current = null;
+    }
     setAudioPartIndex(0);
     pendingPartSeek.current = null;
     if (audioRef.current) {
@@ -797,6 +834,39 @@ export default function AudiobookApp() {
     }
     setAudioPlaying(false);
     setAudioCurrentTime(0);
+  }
+
+  // Reuse the same <audio> element for every part. A rejected play() is visible
+  // instead of silently leaving the player in a false "playing" state.
+  function requestAudioPlayback(silent = false): void {
+    const audio = audioRef.current;
+    if (!audio) return;
+    playbackWanted.current = true;
+    void audio.play().catch(error => {
+      if (error?.name === 'AbortError') return; // React is switching the source.
+      playbackWanted.current = false;
+      setAudioPlaying(false);
+      console.warn('Auralis playback refused:', error);
+      if (!silent) showToast(
+        error?.name === 'NotAllowedError'
+          ? 'Safari demande de toucher à nouveau Lecture pour continuer.'
+          : 'La lecture a été interrompue. Réessaie avec le bouton Lecture.',
+        true
+      );
+    });
+  }
+
+  function retryUnexpectedPause(): void {
+    const audio = audioRef.current;
+    if (!audio || !playbackWanted.current || audio.ended || audio.error ||
+        pendingPartSeek.current || playbackRetries.current >= 1 ||
+        playbackRetryTimer.current !== null) return;
+    playbackRetries.current += 1;
+    playbackRetryTimer.current = window.setTimeout(() => {
+      playbackRetryTimer.current = null;
+      if (playbackWanted.current && audioRef.current === audio && audio.paused && !audio.ended)
+        requestAudioPlayback();
+    }, 600);
   }
 
   function updateRate(newRate: number): void {
@@ -870,7 +940,7 @@ export default function AudiobookApp() {
     setDockedDismissed(false);
     if (!startPlayback) return;
     if (sameChapter && playableAudioUrl && audioRef.current) {
-      void audioRef.current.play().catch(() => undefined);
+      requestAudioPlayback();
     } else {
       // The audio source changes after React selects the chapter. Playback
       // must wait for the first part to finish loading.
@@ -881,11 +951,11 @@ export default function AudiobookApp() {
   function togglePlayPause(): void {
     if (playableAudioUrl && audioRef.current) {
       if (audioPlaying) {
+        playbackWanted.current = false;
         audioRef.current.pause();
       } else {
-        void audioRef.current.play().catch(e => {
-          console.error('Audio playback error:', e);
-        });
+        playbackRetries.current = 0;
+        requestAudioPlayback();
       }
     } else {
       showToast('Pas encore d’audio pour ce chapitre. Choisis une voix avant de lancer la génération.');
@@ -1309,11 +1379,11 @@ export default function AudiobookApp() {
         setAudioPartIndex(index);
       } else {
         audioRef.current.currentTime = local;
-        if (autoStart) void audioRef.current.play().catch(() => undefined);
+        if (autoStart) requestAudioPlayback();
       }
     } else {
       audioRef.current.currentTime = clamped;
-      if (autoStart) void audioRef.current.play().catch(() => undefined);
+      if (autoStart) requestAudioPlayback();
     }
     setAudioCurrentTime(clamped);
   }
@@ -1328,8 +1398,7 @@ export default function AudiobookApp() {
       if (autoStart) {
         setTimeout(() => {
           if (audioRef.current && ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id])))) {
-            void audioRef.current.play().catch(() => undefined);
-            setAudioPlaying(true);
+            requestAudioPlayback();
           } else {
             showToast('Le chapitre suivant n’a pas encore été généré.');
           }
@@ -1444,7 +1513,11 @@ export default function AudiobookApp() {
       await putAudio(record);
       // Only clear temporary segments AFTER the completed chapter is durable.
       await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
-      setAudioMap(current => ({ ...current, [chapter.id]: record }));
+      const playableRecord = await prepareAudioForMobile(record).catch(error => {
+        console.warn('Auralis: unable to prepare mobile recording:', error);
+        return record;
+      });
+      setAudioMap(current => ({ ...current, [chapter.id]: playableRecord }));
       setCachedAudioPassages(current => ({ ...current, [chapter.id]: 0 }));
       // Reveal the Spotify-style player as soon as a chapter is ready.
       // Do not auto-play audio without a user playback gesture.
@@ -1975,7 +2048,7 @@ export default function AudiobookApp() {
                               if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                                 const targetSec = (idx / paragraphs.length) * audioDuration;
                                 seekTo(targetSec);
-                                if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                                if (!audioPlaying) requestAudioPlayback();
                               }
                             }}
                           >
@@ -3068,18 +3141,41 @@ export default function AudiobookApp() {
           const pending = pendingPartSeek.current;
           if (pending) {
             pendingPartSeek.current = null;
-            audio.currentTime = Math.min(pending.seconds, Math.max(0, audio.duration - 0.05));
-            if (pending.play) void audio.play().catch(() => undefined);
+            const safeDuration = Number.isFinite(audio.duration)
+              ? Math.max(0, audio.duration - 0.05)
+              : Math.max(0, pending.seconds);
+            audio.currentTime = Math.min(Math.max(0, pending.seconds), safeDuration);
+            if (pending.play) requestAudioPlayback();
           }
         }}
-        onPlay={() => setAudioPlaying(true)}
-        onPause={() => setAudioPlaying(false)}
+        onPlay={() => {
+          playbackWanted.current = true;
+          setAudioPlaying(true);
+        }}
+        onPause={() => {
+          setAudioPlaying(false);
+          retryUnexpectedPause();
+        }}
+        onStalled={() => retryUnexpectedPause()}
+        onError={() => {
+          const audio = audioRef.current;
+          console.warn('Auralis audio error', {
+            code: audio?.error?.code,
+            networkState: audio?.networkState,
+            readyState: audio?.readyState,
+            part: audioPartIndex,
+          });
+          playbackWanted.current = false;
+          setAudioPlaying(false);
+          showToast('Ce passage audio ne peut pas être lu sur Safari. Réessaie ou recharge le livre.', true);
+        }}
         onEnded={() => {
           if (currentAudio?.parts && audioPartIndex + 1 < currentAudio.parts.length) {
             pendingPartSeek.current = { seconds: 0, play: true };
             setAudioPartIndex(index => index + 1);
             return;
           }
+          playbackWanted.current = false;
           setAudioPlaying(false);
           if (autoPlayNext) goToNextChapter(true);
         }}
@@ -3248,7 +3344,7 @@ export default function AudiobookApp() {
                     if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                       const targetSec = (idx / paragraphs.length) * audioDuration;
                       seekTo(targetSec);
-                      if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                      if (!audioPlaying) requestAudioPlayback();
                     }
                   }}
                 >
