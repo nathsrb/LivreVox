@@ -1375,7 +1375,7 @@ export default function AudiobookApp() {
       }
       const local = Math.max(0, Math.min(clamped - offset, Math.max(0, durations[index] - 0.05)));
       if (index !== audioPartIndex) {
-        pendingPartSeek.current = { seconds: local, play: autoStart || audioPlaying };
+        pendingPartSeek.current = { seconds: local, play: autoStart || playbackWanted.current };
         setAudioPartIndex(index);
       } else {
         audioRef.current.currentTime = local;
@@ -1396,13 +1396,12 @@ export default function AudiobookApp() {
       setChapterId(next.id);
       setAudioCurrentTime(0);
       if (autoStart) {
-        setTimeout(() => {
-          if (audioRef.current && ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id])))) {
-            requestAudioPlayback();
-          } else {
-            showToast('Le chapitre suivant n’a pas encore été généré.');
-          }
-        }, 280);
+        if ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id]))) {
+          // Wait for the new source's metadata rather than guessing a delay.
+          pendingPartSeek.current = { seconds: 0, play: true };
+        } else {
+          showToast('Le chapitre suivant n’a pas encore été généré.');
+        }
       }
     } else {
       showToast('🎉 Livre terminé ! Félicitations pour votre écoute.');
