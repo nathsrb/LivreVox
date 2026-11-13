@@ -15,4 +15,5 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npx tsc --noEmit
+      - run: npx tsx .github/auralis-ios-audio-smoke.mts
       - run: npm run build
