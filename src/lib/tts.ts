@@ -403,7 +403,7 @@ export async function synthesizeChapter(
   customApiKey?: string,
   cloudVoice?: string,
   cacheContext?: { bookId: string; chapterId: string }
-): Promise<{ blob: Blob; duration: number; engineVoiceId: string; parts?: Blob[]; partDurations?: number[] }> {
+): Promise<{ blob: Blob; duration: number; engineVoiceId: string; parts?: Blob[]; partDurations?: number[]; cacheSaveFailed?: boolean }> {
   const stored = getStoredProviderConfig();
   const activeKey = (customApiKey || stored.apiKey || '').trim();
   const provider = stored.provider;
@@ -443,6 +443,7 @@ export async function synthesizeChapter(
   let completed = 0;
   let reused = 0;
   let failed: unknown = null;
+  let cacheSaveFailed = false;
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < chunks.length && !failed) {
@@ -467,7 +468,7 @@ export async function synthesizeChapter(
             passage, activeKey, cloudVoice, shouldCancel,
             seconds => emitProgress('Nouvelle tentative dans ' + seconds + ' s · passages conservés')
           );
-          if (cacheContext) {
+          if (cacheContext && !cacheSaveFailed) {
             try {
               await saveSpeechSegment({
                 id: cacheContext.bookId + ':' + cacheContext.chapterId + ':' + engineVoiceId + ':' + index,
@@ -478,8 +479,13 @@ export async function synthesizeChapter(
                 textHash: signature,
                 blob: audio,
               });
-            } catch {
-              throw new Error('Le stockage de cet appareil est insuffisant pour conserver la suite de l’audio.');
+            } catch (error) {
+              // Safari may reject IndexedDB writes even when the phone has
+              // free space. The audio is already present as a Blob in memory:
+              // keep generating rather than discard paid TTS work.
+              cacheSaveFailed = true;
+              console.warn('Auralis: speech cache write failed; continuing in memory', error);
+              emitProgress('Stockage local indisponible · création de l’audio poursuivie');
             }
           }
         }
@@ -527,6 +533,7 @@ export async function synthesizeChapter(
       blob: rendered[0].blob,
       duration,
       engineVoiceId,
+      cacheSaveFailed,
       ...(rendered.length > 1 ? {
         parts: rendered.map(part => part.blob),
         partDurations: rendered.map(part => part.duration),
@@ -536,7 +543,7 @@ export async function synthesizeChapter(
   const combinedBlob = new Blob(generated, { type: generated[0]?.type || 'audio/mpeg' });
   const duration = Math.max(1, text.trim().split(/\s+/).length / 150) * 60;
   onProgress(100, 'Chapitre audio prêt');
-  return { blob: combinedBlob, duration, engineVoiceId };
+  return { blob: combinedBlob, duration, engineVoiceId, cacheSaveFailed };
 }
 
 /** Build a ZIP incrementally so exporting does not require a huge JS ArrayBuffer. */

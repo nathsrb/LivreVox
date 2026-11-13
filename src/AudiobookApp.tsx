@@ -47,6 +47,7 @@ import {
   splitIntoChapters,
 } from './lib/text';
 import { extractPdf, renderPdfPageImage } from './lib/pdf';
+import { prepareAudioForMobile } from './lib/mobileAudio';
 import {
   CLOUD_THRESHOLD_BYTES,
   deleteCloudJob,
@@ -258,6 +259,10 @@ export default function AudiobookApp() {
   const [passwordValue, setPasswordValue] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // Audio that could not be persisted is still usable until this page closes.
+  // Never report such a recording as safely saved on the device.
+  const sessionAudioRef = useRef<Map<string, AudioRecord>>(new Map());
+  const [sessionOnlyAudio, setSessionOnlyAudio] = useState<Record<string, boolean>>({});
   const cancelGeneration = useRef(false);
   // Prevent two audiobook jobs from flooding Kokoro concurrently if the user
   // clicks a chapter-row action while another long chapter is still running.
@@ -269,6 +274,9 @@ export default function AudiobookApp() {
   const [audioPartIndex, setAudioPartIndex] = useState(0);
   const pendingPartSeek = useRef<{ seconds: number; play: boolean } | null>(null);
   const pendingChapterResume = useRef<{ bookId: string; chapterId: string; seconds: number } | null>(null);
+  const playbackWanted = useRef(false);
+  const playbackRetryTimer = useRef<number | null>(null);
+  const playbackRetries = useRef(0);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isImmersiveOpen, setIsImmersiveOpen] = useState(false);
@@ -454,12 +462,24 @@ export default function AudiobookApp() {
     }
     if (!selectedBook.chapters.some(chapter => chapter.id === chapterId))
       setChapterId(selectedBook.chapters[0]?.id ?? '');
+    let cancelled = false;
     void getBookAudio(selectedBook.id).then(async records => {
       const previousLocalAudio = records.filter(record => !isCloudGeneratedAudio(record));
       await Promise.all(previousLocalAudio.map(record => deleteAudio(record.bookId, record.chapterId))).catch(() => undefined);
       const allowed = records.filter(isCloudGeneratedAudio);
-      setAudioMap(Object.fromEntries(allowed.map(record => [record.chapterId, record])));
-    });
+      const playable = await Promise.all(allowed.map(record =>
+        prepareAudioForMobile(record).catch(error => {
+          console.warn('Auralis: unable to prepare mobile audio:', error);
+          return record;
+        })
+      ));
+      if (!cancelled) {
+        const inMemory = Array.from(sessionAudioRef.current.values())
+          .filter(record => record.bookId === selectedBook.id);
+        setAudioMap(Object.fromEntries([...playable, ...inMemory].map(record => [record.chapterId, record])));
+      }
+    }).catch(error => console.warn('Auralis: unable to load saved audio:', error));
+    return () => { cancelled = true; };
   }, [selectedBook?.id]);
 
   useEffect(() => {
@@ -468,11 +488,29 @@ export default function AudiobookApp() {
     };
   }, [audioUrl]);
 
+  // Retry at most once per source; each WAV part starts with a clean budget.
+  useEffect(() => {
+    playbackRetries.current = 0;
+    if (playbackRetryTimer.current !== null) {
+      window.clearTimeout(playbackRetryTimer.current);
+      playbackRetryTimer.current = null;
+    }
+    return () => {
+      if (playbackRetryTimer.current !== null) {
+        window.clearTimeout(playbackRetryTimer.current);
+        playbackRetryTimer.current = null;
+      }
+    };
+  }, [playableAudioUrl]);
+
   useEffect(() => {
     // Keep a pending autoplay request while switching chapters. Only clear
     // a pending seek when the audio part itself has not changed.
     setAudioPartIndex(0);
-    if (!pendingPartSeek.current?.play) pendingPartSeek.current = null;
+    if (!pendingPartSeek.current?.play) {
+      pendingPartSeek.current = null;
+      playbackWanted.current = false;
+    }
     setAudioCurrentTime(0);
   }, [selectedBook?.id, selectedChapter?.id, currentAudio?.createdAt]);
 
@@ -526,9 +564,10 @@ export default function AudiobookApp() {
         album: selectedBook.title,
       });
       navigator.mediaSession.setActionHandler('play', () => {
-        void audioRef.current?.play().catch(() => undefined);
+        requestAudioPlayback();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        playbackWanted.current = false;
         audioRef.current?.pause();
       });
       navigator.mediaSession.setActionHandler('seekbackward', () => {
@@ -563,6 +602,7 @@ export default function AudiobookApp() {
       setSleepRemainingSeconds(prev => {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
+          playbackWanted.current = false;
           if (audioRef.current) audioRef.current.pause();
           setAudioPlaying(false);
           setSleepTimerMinutes(null);
@@ -789,6 +829,11 @@ export default function AudiobookApp() {
   }
 
   function stopAllPlayback(): void {
+    playbackWanted.current = false;
+    if (playbackRetryTimer.current !== null) {
+      window.clearTimeout(playbackRetryTimer.current);
+      playbackRetryTimer.current = null;
+    }
     setAudioPartIndex(0);
     pendingPartSeek.current = null;
     if (audioRef.current) {
@@ -797,6 +842,39 @@ export default function AudiobookApp() {
     }
     setAudioPlaying(false);
     setAudioCurrentTime(0);
+  }
+
+  // Reuse the same <audio> element for every part. A rejected play() is visible
+  // instead of silently leaving the player in a false "playing" state.
+  function requestAudioPlayback(silent = false): void {
+    const audio = audioRef.current;
+    if (!audio) return;
+    playbackWanted.current = true;
+    void audio.play().catch(error => {
+      if (error?.name === 'AbortError') return; // React is switching the source.
+      playbackWanted.current = false;
+      setAudioPlaying(false);
+      console.warn('Auralis playback refused:', error);
+      if (!silent) showToast(
+        error?.name === 'NotAllowedError'
+          ? 'Safari demande de toucher à nouveau Lecture pour continuer.'
+          : 'La lecture a été interrompue. Réessaie avec le bouton Lecture.',
+        true
+      );
+    });
+  }
+
+  function retryUnexpectedPause(): void {
+    const audio = audioRef.current;
+    if (!audio || !playbackWanted.current || audio.ended || audio.error ||
+        pendingPartSeek.current || playbackRetries.current >= 1 ||
+        playbackRetryTimer.current !== null) return;
+    playbackRetries.current += 1;
+    playbackRetryTimer.current = window.setTimeout(() => {
+      playbackRetryTimer.current = null;
+      if (playbackWanted.current && audioRef.current === audio && audio.paused && !audio.ended)
+        requestAudioPlayback();
+    }, 600);
   }
 
   function updateRate(newRate: number): void {
@@ -870,7 +948,7 @@ export default function AudiobookApp() {
     setDockedDismissed(false);
     if (!startPlayback) return;
     if (sameChapter && playableAudioUrl && audioRef.current) {
-      void audioRef.current.play().catch(() => undefined);
+      requestAudioPlayback();
     } else {
       // The audio source changes after React selects the chapter. Playback
       // must wait for the first part to finish loading.
@@ -881,11 +959,11 @@ export default function AudiobookApp() {
   function togglePlayPause(): void {
     if (playableAudioUrl && audioRef.current) {
       if (audioPlaying) {
+        playbackWanted.current = false;
         audioRef.current.pause();
       } else {
-        void audioRef.current.play().catch(e => {
-          console.error('Audio playback error:', e);
-        });
+        playbackRetries.current = 0;
+        requestAudioPlayback();
       }
     } else {
       showToast('Pas encore d’audio pour ce chapitre. Choisis une voix avant de lancer la génération.');
@@ -1305,15 +1383,15 @@ export default function AudiobookApp() {
       }
       const local = Math.max(0, Math.min(clamped - offset, Math.max(0, durations[index] - 0.05)));
       if (index !== audioPartIndex) {
-        pendingPartSeek.current = { seconds: local, play: autoStart || audioPlaying };
+        pendingPartSeek.current = { seconds: local, play: autoStart || playbackWanted.current };
         setAudioPartIndex(index);
       } else {
         audioRef.current.currentTime = local;
-        if (autoStart) void audioRef.current.play().catch(() => undefined);
+        if (autoStart) requestAudioPlayback();
       }
     } else {
       audioRef.current.currentTime = clamped;
-      if (autoStart) void audioRef.current.play().catch(() => undefined);
+      if (autoStart) requestAudioPlayback();
     }
     setAudioCurrentTime(clamped);
   }
@@ -1326,14 +1404,12 @@ export default function AudiobookApp() {
       setChapterId(next.id);
       setAudioCurrentTime(0);
       if (autoStart) {
-        setTimeout(() => {
-          if (audioRef.current && ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id])))) {
-            void audioRef.current.play().catch(() => undefined);
-            setAudioPlaying(true);
-          } else {
-            showToast('Le chapitre suivant n’a pas encore été généré.');
-          }
-        }, 280);
+        if ((isCloudBook && next.audioUrl) || (audioMap[next.id] && isCloudGeneratedAudio(audioMap[next.id]))) {
+          // Wait for the new source's metadata rather than guessing a delay.
+          pendingPartSeek.current = { seconds: 0, play: true };
+        } else {
+          showToast('Le chapitre suivant n’a pas encore été généré.');
+        }
       }
     } else {
       showToast('🎉 Livre terminé ! Félicitations pour votre écoute.');
@@ -1441,17 +1517,44 @@ export default function AudiobookApp() {
         duration: result.duration,
         createdAt: Date.now(),
       };
-      await putAudio(record);
-      // Only clear temporary segments AFTER the completed chapter is durable.
-      await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
-      setAudioMap(current => ({ ...current, [chapter.id]: record }));
+      let persisted = false;
+      try {
+        await putAudio(record);
+        persisted = true;
+      } catch (error) {
+        // When Safari reaches its per-site storage limit, keep the finished
+        // recording available for playback/download in the current session.
+        console.warn('Auralis: finished audio could not be stored', error);
+      }
+      if (persisted) {
+        // Only clear temporary segments AFTER the completed chapter is durable.
+        await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
+        sessionAudioRef.current.delete(record.id);
+      } else {
+        sessionAudioRef.current.set(record.id, record);
+      }
+      setSessionOnlyAudio(current => {
+        const updated = { ...current };
+        if (persisted) delete updated[record.id];
+        else updated[record.id] = true;
+        return updated;
+      });
+      const playableRecord = await prepareAudioForMobile(record).catch(error => {
+        console.warn('Auralis: unable to prepare mobile recording:', error);
+        return record;
+      });
+      setAudioMap(current => ({ ...current, [chapter.id]: playableRecord }));
       setCachedAudioPassages(current => ({ ...current, [chapter.id]: 0 }));
       // Reveal the Spotify-style player as soon as a chapter is ready.
       // Do not auto-play audio without a user playback gesture.
       setChapterId(chapter.id);
       setTab('listen');
       setDockedDismissed(false);
-      showToast(`Chapitre « ${chapter.title} » prêt à écouter dans Auralis.`);
+      if (persisted) {
+        showToast(`Chapitre « ${chapter.title} » prêt à écouter dans Auralis.`);
+      } else {
+        showToast('Audio prêt à écouter, mais non sauvegardé sur cet appareil. Télécharge-le avant de fermer cette page.', true);
+      }
       return record;
     } catch (error) {
       showToast(
@@ -1468,7 +1571,8 @@ export default function AudiobookApp() {
   async function generateCurrent(): Promise<void> {
     if (!selectedBook || !selectedChapter) return;
     const record = await generateOne(selectedBook, selectedChapter, 'chapter');
-    if (record) showToast(`Chapitre prêt · ${audioSourceLabel(record.voiceId)}. Fichier sauvegardé sur cet appareil.`);
+    // generateOne already reports whether the result is durable or session-only.
+    void record;
   }
 
   async function generateAll(): Promise<void> {
@@ -1507,7 +1611,10 @@ export default function AudiobookApp() {
     if (!selectedBook) return;
     const records = await getBookAudio(selectedBook.id);
     const map = Object.fromEntries(
-      records.filter(isCloudGeneratedAudio).map(record => [record.chapterId, record])
+      [
+        ...records.filter(isCloudGeneratedAudio),
+        ...Array.from(sessionAudioRef.current.values()).filter(record => record.bookId === selectedBook.id),
+      ].map(record => [record.chapterId, record])
     );
     const missing = selectedBook.chapters.filter(chapter => !map[chapter.id]);
     if (missing.length) {
@@ -1564,6 +1671,13 @@ export default function AudiobookApp() {
 
   async function removeGeneratedChapter(chapter: Chapter): Promise<void> {
     if (!selectedBook) return;
+    const key = `${selectedBook.id}:${chapter.id}`;
+    sessionAudioRef.current.delete(key);
+    setSessionOnlyAudio(current => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     await deleteAudio(selectedBook.id, chapter.id);
     setAudioMap(current => {
       const next = { ...current };
@@ -1975,7 +2089,7 @@ export default function AudiobookApp() {
                               if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                                 const targetSec = (idx / paragraphs.length) * audioDuration;
                                 seekTo(targetSec);
-                                if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                                if (!audioPlaying) requestAudioPlayback();
                               }
                             }}
                           >
@@ -2441,7 +2555,9 @@ export default function AudiobookApp() {
                           <span>{chapter.words} mots</span>
                         </div>
                         <span>
-                          {chapter.audioUrl ? 'Prêt à écouter' : audioMap[chapter.id] ? 'Prêt à écouter' : cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
+                          {chapter.audioUrl ? 'Prêt à écouter' : audioMap[chapter.id] ?
+                            (sessionOnlyAudio[`${selectedBook.id}:${chapter.id}`] ? 'Audio provisoire · à télécharger' : 'Prêt à écouter') :
+                            cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
                         </span>
                         <div className="lv-table-actions">
                           {chapter.audioUrl || audioMap[chapter.id] ? (
@@ -3068,18 +3184,41 @@ export default function AudiobookApp() {
           const pending = pendingPartSeek.current;
           if (pending) {
             pendingPartSeek.current = null;
-            audio.currentTime = Math.min(pending.seconds, Math.max(0, audio.duration - 0.05));
-            if (pending.play) void audio.play().catch(() => undefined);
+            const safeDuration = Number.isFinite(audio.duration)
+              ? Math.max(0, audio.duration - 0.05)
+              : Math.max(0, pending.seconds);
+            audio.currentTime = Math.min(Math.max(0, pending.seconds), safeDuration);
+            if (pending.play) requestAudioPlayback();
           }
         }}
-        onPlay={() => setAudioPlaying(true)}
-        onPause={() => setAudioPlaying(false)}
+        onPlay={() => {
+          playbackWanted.current = true;
+          setAudioPlaying(true);
+        }}
+        onPause={() => {
+          setAudioPlaying(false);
+          retryUnexpectedPause();
+        }}
+        onStalled={() => retryUnexpectedPause()}
+        onError={() => {
+          const audio = audioRef.current;
+          console.warn('Auralis audio error', {
+            code: audio?.error?.code,
+            networkState: audio?.networkState,
+            readyState: audio?.readyState,
+            part: audioPartIndex,
+          });
+          playbackWanted.current = false;
+          setAudioPlaying(false);
+          showToast('Ce passage audio ne peut pas être lu sur Safari. Réessaie ou recharge le livre.', true);
+        }}
         onEnded={() => {
           if (currentAudio?.parts && audioPartIndex + 1 < currentAudio.parts.length) {
             pendingPartSeek.current = { seconds: 0, play: true };
             setAudioPartIndex(index => index + 1);
             return;
           }
+          playbackWanted.current = false;
           setAudioPlaying(false);
           if (autoPlayNext) goToNextChapter(true);
         }}
@@ -3248,7 +3387,7 @@ export default function AudiobookApp() {
                     if (playableAudioUrl && audioDuration > 0 && audioRef.current) {
                       const targetSec = (idx / paragraphs.length) * audioDuration;
                       seekTo(targetSec);
-                      if (!audioPlaying) void audioRef.current.play().catch(() => undefined);
+                      if (!audioPlaying) requestAudioPlayback();
                     }
                   }}
                 >
