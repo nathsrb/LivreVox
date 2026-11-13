@@ -259,6 +259,10 @@ export default function AudiobookApp() {
   const [passwordValue, setPasswordValue] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // Audio that could not be persisted is still usable until this page closes.
+  // Never report such a recording as safely saved on the device.
+  const sessionAudioRef = useRef<Map<string, AudioRecord>>(new Map());
+  const [sessionOnlyAudio, setSessionOnlyAudio] = useState<Record<string, boolean>>({});
   const cancelGeneration = useRef(false);
   // Prevent two audiobook jobs from flooding Kokoro concurrently if the user
   // clicks a chapter-row action while another long chapter is still running.
@@ -469,7 +473,11 @@ export default function AudiobookApp() {
           return record;
         })
       ));
-      if (!cancelled) setAudioMap(Object.fromEntries(playable.map(record => [record.chapterId, record])));
+      if (!cancelled) {
+        const inMemory = Array.from(sessionAudioRef.current.values())
+          .filter(record => record.bookId === selectedBook.id);
+        setAudioMap(Object.fromEntries([...playable, ...inMemory].map(record => [record.chapterId, record])));
+      }
     }).catch(error => console.warn('Auralis: unable to load saved audio:', error));
     return () => { cancelled = true; };
   }, [selectedBook?.id]);
@@ -1509,9 +1517,28 @@ export default function AudiobookApp() {
         duration: result.duration,
         createdAt: Date.now(),
       };
-      await putAudio(record);
-      // Only clear temporary segments AFTER the completed chapter is durable.
-      await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
+      let persisted = false;
+      try {
+        await putAudio(record);
+        persisted = true;
+      } catch (error) {
+        // When Safari reaches its per-site storage limit, keep the finished
+        // recording available for playback/download in the current session.
+        console.warn('Auralis: finished audio could not be stored', error);
+      }
+      if (persisted) {
+        // Only clear temporary segments AFTER the completed chapter is durable.
+        await clearSpeechSegments(book.id, chapter.id).catch(() => undefined);
+        sessionAudioRef.current.delete(record.id);
+      } else {
+        sessionAudioRef.current.set(record.id, record);
+      }
+      setSessionOnlyAudio(current => {
+        const updated = { ...current };
+        if (persisted) delete updated[record.id];
+        else updated[record.id] = true;
+        return updated;
+      });
       const playableRecord = await prepareAudioForMobile(record).catch(error => {
         console.warn('Auralis: unable to prepare mobile recording:', error);
         return record;
@@ -1523,7 +1550,11 @@ export default function AudiobookApp() {
       setChapterId(chapter.id);
       setTab('listen');
       setDockedDismissed(false);
-      showToast(`Chapitre « ${chapter.title} » prêt à écouter dans Auralis.`);
+      if (persisted) {
+        showToast(`Chapitre « ${chapter.title} » prêt à écouter dans Auralis.`);
+      } else {
+        showToast('Audio prêt à écouter, mais non sauvegardé sur cet appareil. Télécharge-le avant de fermer cette page.', true);
+      }
       return record;
     } catch (error) {
       showToast(
@@ -1540,7 +1571,8 @@ export default function AudiobookApp() {
   async function generateCurrent(): Promise<void> {
     if (!selectedBook || !selectedChapter) return;
     const record = await generateOne(selectedBook, selectedChapter, 'chapter');
-    if (record) showToast(`Chapitre prêt · ${audioSourceLabel(record.voiceId)}. Fichier sauvegardé sur cet appareil.`);
+    // generateOne already reports whether the result is durable or session-only.
+    void record;
   }
 
   async function generateAll(): Promise<void> {
@@ -1579,7 +1611,10 @@ export default function AudiobookApp() {
     if (!selectedBook) return;
     const records = await getBookAudio(selectedBook.id);
     const map = Object.fromEntries(
-      records.filter(isCloudGeneratedAudio).map(record => [record.chapterId, record])
+      [
+        ...records.filter(isCloudGeneratedAudio),
+        ...Array.from(sessionAudioRef.current.values()).filter(record => record.bookId === selectedBook.id),
+      ].map(record => [record.chapterId, record])
     );
     const missing = selectedBook.chapters.filter(chapter => !map[chapter.id]);
     if (missing.length) {
@@ -1636,6 +1671,13 @@ export default function AudiobookApp() {
 
   async function removeGeneratedChapter(chapter: Chapter): Promise<void> {
     if (!selectedBook) return;
+    const key = `${selectedBook.id}:${chapter.id}`;
+    sessionAudioRef.current.delete(key);
+    setSessionOnlyAudio(current => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     await deleteAudio(selectedBook.id, chapter.id);
     setAudioMap(current => {
       const next = { ...current };
@@ -2513,7 +2555,9 @@ export default function AudiobookApp() {
                           <span>{chapter.words} mots</span>
                         </div>
                         <span>
-                          {chapter.audioUrl ? 'Prêt à écouter' : audioMap[chapter.id] ? 'Prêt à écouter' : cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
+                          {chapter.audioUrl ? 'Prêt à écouter' : audioMap[chapter.id] ?
+                            (sessionOnlyAudio[`${selectedBook.id}:${chapter.id}`] ? 'Audio provisoire · à télécharger' : 'Prêt à écouter') :
+                            cachedAudioPassages[chapter.id] ? cachedAudioPassages[chapter.id] + ' passages sauvegardés · à reprendre' : 'À générer'}
                         </span>
                         <div className="lv-table-actions">
                           {chapter.audioUrl || audioMap[chapter.id] ? (
