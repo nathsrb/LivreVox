@@ -2062,3 +2062,68 @@ select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
   .lv-icon-button { width: 38px; height: 38px; }
   .lv-content { padding-left: 14px; padding-right: 14px; }
 }
+
+/* Mobile library switcher: existing local books remain one tap away. */
+.lv-mobile-library-close,
+.lv-mobile-library-count,
+.lv-library-scrim { display: none; }
+@media (max-width: 900px) {
+  .lv-library-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 89;
+    border: none;
+    background: rgba(0, 0, 0, .65);
+    backdrop-filter: blur(2px);
+  }
+  .lv-sidebar.lv-sidebar-mobile-open {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(85vw, 345px);
+    height: 100dvh;
+    overflow: hidden;
+    z-index: 90;
+    box-shadow: 12px 0 45px rgba(0, 0, 0, .55);
+    padding-top: max(22px, env(safe-area-inset-top));
+    padding-bottom: max(22px, env(safe-area-inset-bottom));
+  }
+  .lv-mobile-library-close {
+    display: grid;
+    place-items: center;
+    margin-right: 2px;
+    border: 1px solid var(--line, #334452);
+    color: inherit;
+    background: transparent;
+    min-width: 35px;
+    height: 35px;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .lv-mobile-library-toggle {
+    position: relative;
+    border: 1px solid rgba(193,132,86,.55);
+    color: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .lv-mobile-library-count {
+    display: grid;
+    place-items: center;
+    position: absolute;
+    right: -6px;
+    top: -7px;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 3px;
+    border-radius: 99px;
+    background: #bf8554;
+    color: #101820;
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .lv-sidebar-mobile-open .lv-books { flex: 1; overflow-y: auto; }
+}
