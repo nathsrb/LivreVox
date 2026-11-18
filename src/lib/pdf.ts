@@ -1,5 +1,7 @@
 import './polyfills';
 import * as pdfjsLib from 'pdfjs-dist';
+import { createWorker } from 'tesseract.js';
+import tesseractWorkerUrl from 'tesseract.js/dist/worker.min.js?url';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { ImportProgress } from '../types';
 
@@ -241,6 +243,159 @@ async function sectionsFromOutline(
   return undefined;
 }
 
+
+/**
+ * A scanned PDF page can contain two facing book pages. Keep their reading
+ * order (left then right) before trying to find chapters in the OCR output.
+ * Chapters are inferred only from headings at the TOP of a physical page.
+ */
+function sectionsFromScannedPages(
+  physicalPages: string[]
+): Array<{ title: string; text: string }> | undefined {
+  type Heading = { index: number; title: string; number?: number };
+  const structural: Heading[] = [];
+  const numbered: Heading[] = [];
+  const romanNumber = (value: string): number => {
+    const values: Record<string, number> = { I: 1, V: 5, X: 10, L: 50 };
+    let total = 0;
+    const upper = value.toUpperCase();
+    for (let i = 0; i < upper.length; i++) {
+      const current = values[upper[i]] || 0;
+      const next = values[upper[i + 1]] || 0;
+      total += current < next ? -current : current;
+    }
+    return total;
+  };
+
+  physicalPages.forEach((text, index) => {
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 7);
+    if (lines.length < 2) return;
+    const chapterAt = lines.findIndex((line, position) =>
+      position < 3 && /^(?:chapitre|chapter)\b(?:\s+(?:\d{1,2}|[IVXL]{1,7}))?\s*[.:–-]?$/i.test(line)
+    );
+    if (chapterAt !== -1) {
+      const label = lines[chapterAt];
+      const next = (lines[chapterAt + 1] || '').replace(/\s+/g, ' ');
+      const title = next.length >= 4 && next.length <= 95
+        ? label + ' — ' + next
+        : label;
+      structural.push({ index, title });
+      return;
+    }
+
+    const first = lines[0].replace(/[.]/g, '').trim();
+    const marker = /^(\d{1,2}|[IVXL]{1,7})$/i.exec(first);
+    if (!marker) return;
+    const number = /^\d+$/.test(first) ? Number(first) : romanNumber(first);
+    const title = lines[1].replace(/\s+/g, ' ').trim();
+    if (number < 1 || number > 60 || title.length < 4 || title.length > 90) return;
+    // Page-number headers are not book chapters: only accept a consecutive
+    // sequence starting at chapter 1, and spaced across multiple pages.
+    numbered.push({ index, number, title: 'Chapitre ' + number + ' — ' + title });
+  });
+
+  let headings = structural;
+  if (headings.length < 2) {
+    const sequence: Heading[] = [];
+    for (const candidate of numbered) {
+      if (candidate.number !== sequence.length + 1) continue;
+      if (sequence.length && candidate.index - sequence[sequence.length - 1].index < 2) continue;
+      sequence.push(candidate);
+    }
+    headings = sequence.length >= 3 ? sequence : [];
+  }
+  if (headings.length < 2 || headings.length > 60) return undefined;
+
+  const sections: Array<{ title: string; text: string }> = [];
+  const intro = physicalPages.slice(0, headings[0].index).join('\n\n').trim();
+  if (intro.length >= 200) sections.push({ title: 'Pages préliminaires', text: intro });
+  headings.forEach((heading, index) => {
+    const end = headings[index + 1]?.index ?? physicalPages.length;
+    const text = physicalPages.slice(heading.index, end).join('\n\n').trim();
+    if (text.length >= 200) sections.push({ title: heading.title, text });
+  });
+  return sections.length >= 2 ? sections : undefined;
+}
+
+
+/**
+ * On-device OCR checkpoints. Store each half of a scanned spread independently:
+ * Safari can close a tab between the left and right halves of the same page.
+ * The cache is intentionally local; no PDF content is uploaded to Netlify.
+ */
+const OCR_CACHE_DB = 'auralis-ocr-checkpoints-v1';
+const OCR_CACHE_STORE = 'panels';
+
+async function pdfCacheFingerprint(file: File): Promise<string> {
+  // Hash a small sample from both ends, plus size/name/mtime. This avoids
+  // reading an entire large PDF into RAM merely to check the cache.
+  const edge = 65536;
+  const first = new Uint8Array(await file.slice(0, edge).arrayBuffer());
+  const last = new Uint8Array(await file.slice(Math.max(0, file.size - edge)).arrayBuffer());
+  const identity = new TextEncoder().encode(
+    file.name + ':' + file.size + ':' + file.lastModified
+  );
+  const sample = new Uint8Array(first.length + last.length + identity.length);
+  sample.set(first);
+  sample.set(last, first.length);
+  sample.set(identity, first.length + last.length);
+  const digest = await crypto.subtle.digest('SHA-256', sample);
+  return Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, '0')).join('');
+}
+
+async function openOcrCache(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return null;
+  return new Promise(resolve => {
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open(OCR_CACHE_DB, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(OCR_CACHE_STORE))
+          db.createObjectStore(OCR_CACHE_STORE);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function readOcrCheckpoint(db: IDBDatabase | null, key: string): Promise<string | null> {
+  if (!db) return null;
+  return new Promise(resolve => {
+    try {
+      const request = db.transaction(OCR_CACHE_STORE, 'readonly').objectStore(OCR_CACHE_STORE).get(key);
+      request.onsuccess = () => resolve(typeof request.result === 'string' ? request.result : null);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function saveOcrCheckpoint(db: IDBDatabase | null, key: string, text: string): Promise<boolean> {
+  if (!db) return false;
+  return new Promise(resolve => {
+    try {
+      const transaction = db.transaction(OCR_CACHE_STORE, 'readwrite');
+      transaction.objectStore(OCR_CACHE_STORE).put(text, key);
+      transaction.oncomplete = () => resolve(true);
+      transaction.onerror = () => resolve(false);
+      transaction.onabort = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function nextFrame(): Promise<void> {
+  // Yield after each image so iOS Safari can release canvas backing stores.
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 export async function extractPdf(
   file: File,
   options: PdfOptions,
@@ -270,10 +425,20 @@ export async function extractPdf(
   };
 
   const pageTexts: string[] = [];
+  const physicalPages: string[] = [];
+  let ocrWorker: Awaited<ReturnType<typeof createWorker>> | null = null;
+  let ocrUsed = false;
+  let cache: IDBDatabase | null = null;
+  let cachePrefix = '';
+  let checkpointWarning = false;
 
   try {
+    if (options.autoOcr) {
+      cache = await openOcrCache();
+      try { cachePrefix = await pdfCacheFingerprint(file); } catch { /* Non-secure contexts may lack subtle crypto. */ }
+    }
     const pdfDocument = await loadingTask.promise;
-    // Preserve the original page indices for bookmark-based chapter boundaries.
+    // Preserve PDF page indices for bookmark-based chapter boundaries.
     pageTexts.length = pdfDocument.numPages;
     pageTexts.fill('');
 
@@ -282,15 +447,145 @@ export async function extractPdf(
       try {
         const content = await page.getTextContent();
         const pageText = textFromContent(content.items as Array<unknown>);
-
-        // Auralis lit uniquement le vrai texte du PDF.
-        // Les images, illustrations et pages scannées sans couche texte sont ignorées.
         if (pageText.replace(/\s/g, '').length >= 20) {
           pageTexts[pageNumber - 1] = pageText;
+          physicalPages.push(pageText);
+        } else if (options.autoOcr) {
+          const normalViewport = page.getViewport({ scale: 1 });
+          const spread = normalViewport.width > normalViewport.height * 1.18;
+          const panelCount = spread ? 2 : 1;
+          const panelKeys = Array.from({ length: panelCount }, (_, panelIndex) =>
+            cachePrefix + ':' + options.ocrLang + ':' + pageNumber + ':' + panelIndex
+          );
+          const cachedPanels = await Promise.all(panelKeys.map(key =>
+            cachePrefix ? readOcrCheckpoint(cache, key) : Promise.resolve(null)
+          ));
+          const recognizedPanels: string[] = [];
+
+          if (cachedPanels.every(value => value !== null)) {
+            // A previously interrupted import resumes without restarting the
+            // OCR worker or re-rendering any completed pages.
+            for (const recognized of cachedPanels) {
+              const text = recognized || '';
+              physicalPages.push(text);
+              recognizedPanels.push(text);
+              if (text) ocrUsed = true;
+            }
+            onProgress({
+              stage: 'Reprise du PDF · page ' + pageNumber + '/' + pdfDocument.numPages + ' déjà enregistrée',
+              progress: 8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
+            });
+          } else {
+            // Keep the canvas reasonably small on iPhone. Render the PDF page
+            // once, process one half at a time, and free each crop immediately.
+            const mobile = /iPhone|iPad|iPod/.test(navigator.userAgent);
+            const targetWidth = mobile ? 1500 : 1800;
+            const scale = Math.min(mobile ? 2.6 : 3.5, Math.max(1.4, targetWidth / normalViewport.width));
+            const viewport = page.getViewport({ scale });
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.ceil(viewport.width);
+            canvas.height = Math.ceil(viewport.height);
+
+            try {
+              const context = canvas.getContext('2d', { alpha: false });
+              if (!context) throw new Error('Mémoire insuffisante pour afficher cette page du PDF.');
+              await page.render({ canvas, canvasContext: context, viewport }).promise;
+
+              for (let panelIndex = 0; panelIndex < panelCount; panelIndex += 1) {
+                onProgress({
+                  stage: 'Reconnaissance du texte · PDF ' + pageNumber + '/' + pdfDocument.numPages +
+                    (spread ? (panelIndex === 0 ? ' · page gauche' : ' · page droite') : ''),
+                  progress: 8 + Math.round(
+                    ((pageNumber - 1 + (panelIndex + 0.5) / panelCount) / pdfDocument.numPages) * 84
+                  ),
+                });
+
+                let recognized = cachedPanels[panelIndex];
+                if (recognized === null) {
+                  // Defer the heavyweight worker until an uncached panel exists.
+                  if (!ocrWorker) {
+                    try {
+                      ocrWorker = await createWorker(options.ocrLang, 1, {
+                        workerPath: tesseractWorkerUrl,
+                        workerBlobURL: false,
+                      });
+                    } catch (error) {
+                      console.error('OCR: initialisation impossible', error);
+                      throw new Error('OCR indisponible. Vérifie la connexion Internet, puis réimporte ce PDF pour reprendre à la dernière page enregistrée.');
+                    }
+                  }
+
+                  let inputCanvas = canvas;
+                  if (spread) {
+                    const left = panelIndex === 0 ? 0 : Math.floor(canvas.width / 2);
+                    const right = panelIndex === 0 ? Math.floor(canvas.width / 2) : canvas.width;
+                    const crop = document.createElement('canvas');
+                    crop.width = right - left;
+                    crop.height = canvas.height;
+                    const cropContext = crop.getContext('2d', { alpha: false });
+                    if (!cropContext) {
+                      crop.width = 0;
+                      crop.height = 0;
+                      throw new Error('Mémoire insuffisante pour découper cette double page.');
+                    }
+                    cropContext.drawImage(canvas, left, 0, right - left, canvas.height,
+                      0, 0, right - left, canvas.height);
+                    inputCanvas = crop;
+                  }
+
+                  try {
+                    // A recognizer can fail transiently without the whole import
+                    // being corrupt: retry the current panel once.
+                    for (let attempt = 0; attempt < 2; attempt += 1) {
+                      try {
+                        const result = await ocrWorker.recognize(inputCanvas);
+                        recognized = result.data.text.replace(/\\u0000/g, '').trim();
+                        break;
+                      } catch (error) {
+                        console.warn('OCR page ' + pageNumber + ', panneau ' + panelIndex, error);
+                        if (attempt === 1) {
+                          throw new Error('OCR interrompu à la page ' + pageNumber +
+                            '. Réimporte le même PDF : les pages déjà reconnues seront récupérées.');
+                        }
+                        await ocrWorker.terminate().catch(() => undefined);
+                        ocrWorker = await createWorker(options.ocrLang, 1, {
+                          workerPath: tesseractWorkerUrl,
+                          workerBlobURL: false,
+                        });
+                      }
+                    }
+                  } finally {
+                    if (inputCanvas !== canvas) {
+                      inputCanvas.width = 0;
+                      inputCanvas.height = 0;
+                      inputCanvas.remove();
+                    }
+                  }
+
+                  recognized = recognized || '';
+                  if (cachePrefix && !await saveOcrCheckpoint(cache, panelKeys[panelIndex], recognized)) {
+                    checkpointWarning = true;
+                  }
+                }
+
+                recognizedPanels.push(recognized || '');
+                physicalPages.push(recognized || '');
+                if (recognized) ocrUsed = true;
+                await nextFrame();
+              }
+            } finally {
+              canvas.width = 0;
+              canvas.height = 0;
+              canvas.remove();
+            }
+          }
+          pageTexts[pageNumber - 1] = recognizedPanels.join('\n\n');
+        } else {
+          physicalPages.push('');
         }
 
         onProgress({
-          stage: `Lecture de la page ${pageNumber}/${pdfDocument.numPages}`,
+          stage: 'Lecture de la page ' + pageNumber + '/' + pdfDocument.numPages,
           progress: 8 + Math.round((pageNumber / pdfDocument.numPages) * 84),
         });
       } finally {
@@ -298,22 +593,31 @@ export async function extractPdf(
       }
     }
 
-    onProgress({
-      stage: 'Création des chapitres',
-      progress: 95,
-    });
+    // A scanned book with only a few recognized words per page is not a
+    // successful import. Never allow a fake one-chapter audiobook.
+    const totalWords = pageTexts.join(' ').trim().split(/\\s+/).filter(Boolean).length;
+    if (options.autoOcr && ocrUsed && totalWords < pdfDocument.numPages * 30) {
+      throw new Error('Texte du livre insuffisant : seulement ' + totalWords +
+        ' mots reconnus sur ' + pdfDocument.numPages +
+        ' pages. La reconnaissance OCR a échoué ; aucun livre incomplet ne sera créé.');
+    }
+    if (checkpointWarning) console.warn('OCR: stockage local indisponible pour certaines pages; reprise partielle possible.');
+    onProgress({ stage: 'Création des chapitres', progress: 95 });
 
-    // Printed chapter markers take priority over bookmark collections.
     const outlineChapters =
+      (ocrUsed ? sectionsFromScannedPages(physicalPages) : undefined) ??
       sectionsFromPrintedChapterNumbers(pageTexts) ??
       await sectionsFromOutline(pdfDocument, pageTexts);
+
     return {
       text: pageTexts.join('\n\n'),
       pages: pdfDocument.numPages,
-      ocrUsed: false,
+      ocrUsed,
       outlineChapters,
     };
   } finally {
+    if (ocrWorker) await ocrWorker.terminate().catch(() => undefined);
+    cache?.close();
     cleanup();
     await loadingTask.destroy().catch(() => undefined);
   }

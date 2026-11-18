@@ -1920,7 +1920,7 @@ export default function AudiobookApp() {
                     <strong>
                       <Zap size={14} /> Documents numérisés
                     </strong>
-                    Les documents contenant du texte fonctionnent directement. Certains PDF scannés demandent une conversion supplémentaire.
+                    Import automatique des PDF classiques et scannés, y compris les livres photographiés en doubles pages. La reconnaissance du texte peut être plus longue.
                   </div>
                   <div className="lv-feature">
                     <strong>
