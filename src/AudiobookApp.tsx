@@ -752,6 +752,7 @@ export default function AudiobookApp() {
     // Import and narration must be separate. No paid API call occurs on upload.
     setTab('chapters');
     setImportProgress(null);
+    showToast(result.ocrUsed ? 'Pages scannées reconnues et texte enregistré dans ta bibliothèque.' : 'PDF importé et texte enregistré.');
     showToast(book.chapters.length === 1 && book.chapters[0].title.includes('chapitres non détectés')
       ? 'PDF importé, mais son sommaire ne permet pas de repérer les chapitres d’origine. Le texte est conservé, sans créer de faux chapitres.'
       : `Livre importé : ${book.chapters.length} section${book.chapters.length > 1 ? 's' : ''}. Choisis la voix avant de générer de l’audio.`);
@@ -1920,7 +1921,7 @@ export default function AudiobookApp() {
                     <strong>
                       <Zap size={14} /> Documents numérisés
                     </strong>
-                    Les documents contenant du texte fonctionnent directement. Certains PDF scannés demandent une conversion supplémentaire.
+                    Import automatique des PDF classiques et scannés, y compris les livres photographiés en doubles pages. La reconnaissance du texte peut être plus longue.
                   </div>
                   <div className="lv-feature">
                     <strong>
