@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   Brain,
+  Library,
   CheckCircle2,
   ChevronRight,
   Download,
@@ -225,6 +226,7 @@ function buildBook(
 export default function AudiobookApp() {
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedId, setSelectedId] = useState('');
+  const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false);
   const [chapterId, setChapterId] = useState('');
   const [tab, setTab] = useState<'listen' | 'chapters' | 'summary' | 'export'>('listen');
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -665,6 +667,7 @@ export default function AudiobookApp() {
   }
 
   function selectBook(book: Book): void {
+    setMobileLibraryOpen(false);
     stopAllPlayback();
     setSelectedId(book.id);
     setChapterId(book.chapters[0]?.id ?? '');
@@ -1723,8 +1726,19 @@ export default function AudiobookApp() {
 
   return (
     <div className="lv-app">
-      <aside className="lv-sidebar">
+      {mobileLibraryOpen && (
+        <button
+          type="button"
+          className="lv-library-scrim"
+          aria-label="Fermer la bibliothèque"
+          onClick={() => setMobileLibraryOpen(false)}
+        />
+      )}
+      <aside className={`lv-sidebar ${mobileLibraryOpen ? 'lv-sidebar-mobile-open' : ''}`} aria-label="Bibliothèque de livres">
         <div className="lv-brand">
+          <button type="button" className="lv-mobile-library-close" aria-label="Fermer la bibliothèque" onClick={() => setMobileLibraryOpen(false)}>
+            <X size={20} />
+          </button>
           <div className="lv-logo">
             <Headphones size={20} />
           </div>
@@ -1733,7 +1747,7 @@ export default function AudiobookApp() {
             <small>Vos livres, autrement</small>
           </div>
         </div>
-        <button className="lv-primary" onClick={() => fileRef.current?.click()}>
+        <button className="lv-primary" onClick={() => { setMobileLibraryOpen(false); fileRef.current?.click(); }}>
           <Plus size={16} /> Importer un PDF
         </button>
         <div className="lv-section-label">Ma bibliothèque</div>
@@ -1779,9 +1793,17 @@ export default function AudiobookApp() {
 
       <main className="lv-main">
         <header className="lv-topbar">
-          <div className="lv-mobile-brand">
-            <Headphones size={17} />
-          </div>
+          <button
+            type="button"
+            className="lv-mobile-brand lv-mobile-library-toggle"
+            onClick={() => setMobileLibraryOpen(true)}
+            aria-label={`Mes livres, ${books.length} dans la bibliothèque`}
+            aria-expanded={mobileLibraryOpen}
+            title="Mes livres"
+          >
+            <Library size={18} />
+            <span className="lv-mobile-library-count">{books.length}</span>
+          </button>
           <div className="lv-topbar-title">
             <strong>{selectedBook?.title ?? 'Auralis'}</strong>
             <span>
