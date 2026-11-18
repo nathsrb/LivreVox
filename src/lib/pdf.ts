@@ -579,7 +579,7 @@ export async function extractPdf(
               canvas.remove();
             }
           }
-          pageTexts[pageNumber - 1] = recognizedPanels.join('\\n\\n');
+          pageTexts[pageNumber - 1] = recognizedPanels.join('\n\n');
         } else {
           physicalPages.push('');
         }
@@ -593,6 +593,14 @@ export async function extractPdf(
       }
     }
 
+    // A scanned book with only a few recognized words per page is not a
+    // successful import. Never allow a fake one-chapter audiobook.
+    const totalWords = pageTexts.join(' ').trim().split(/\\s+/).filter(Boolean).length;
+    if (options.autoOcr && ocrUsed && totalWords < pdfDocument.numPages * 30) {
+      throw new Error('Texte du livre insuffisant : seulement ' + totalWords +
+        ' mots reconnus sur ' + pdfDocument.numPages +
+        ' pages. La reconnaissance OCR a échoué ; aucun livre incomplet ne sera créé.');
+    }
     if (checkpointWarning) console.warn('OCR: stockage local indisponible pour certaines pages; reprise partielle possible.');
     onProgress({ stage: 'Création des chapitres', progress: 95 });
 
